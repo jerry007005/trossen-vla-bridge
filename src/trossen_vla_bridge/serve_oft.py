@@ -56,7 +56,7 @@ from experiments.robot.openvla_utils import (
 )
 
 from openpi_client.base_policy import BasePolicy
-from _websocket_policy_server import WebsocketPolicyServer
+from trossen_vla_bridge._websocket_policy_server import WebsocketPolicyServer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
