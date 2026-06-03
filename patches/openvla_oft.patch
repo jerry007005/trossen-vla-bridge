@@ -1,0 +1,90 @@
+diff --git a/prismatic/vla/constants.py b/prismatic/vla/constants.py
+index 229ae94..827401a 100644
+--- a/prismatic/vla/constants.py
++++ b/prismatic/vla/constants.py
+@@ -44,6 +44,13 @@ BRIDGE_CONSTANTS = {
+     "ACTION_PROPRIO_NORMALIZATION_TYPE": NormalizationType.BOUNDS_Q99,
+ }
+ 
++TROSSEN_CONSTANTS = {
++    "NUM_ACTIONS_CHUNK": 20,                                # 1 second @ 20 fps
++    "ACTION_DIM": 7,                                        # 6 arm joints + 1 gripper
++    "PROPRIO_DIM": 7,                                       # same as action
++    "ACTION_PROPRIO_NORMALIZATION_TYPE": NormalizationType.BOUNDS_Q99,
++}
++
+ 
+ # Function to detect robot platform from command line arguments
+ def detect_robot_platform():
+@@ -55,6 +62,8 @@ def detect_robot_platform():
+         return "ALOHA"
+     elif "bridge" in cmd_args:
+         return "BRIDGE"
++    elif "trossen" in cmd_args:
++        return "TROSSEN"
+     else:
+         # Default to LIBERO if unclear
+         return "LIBERO"
+@@ -70,6 +79,8 @@ elif ROBOT_PLATFORM == "ALOHA":
+     constants = ALOHA_CONSTANTS
+ elif ROBOT_PLATFORM == "BRIDGE":
+     constants = BRIDGE_CONSTANTS
++elif ROBOT_PLATFORM == "TROSSEN":
++    constants = TROSSEN_CONSTANTS
+ 
+ # Assign constants to global variables
+ NUM_ACTIONS_CHUNK = constants["NUM_ACTIONS_CHUNK"]
+diff --git a/prismatic/vla/datasets/rlds/oxe/configs.py b/prismatic/vla/datasets/rlds/oxe/configs.py
+index 3222e02..5ee00db 100644
+--- a/prismatic/vla/datasets/rlds/oxe/configs.py
++++ b/prismatic/vla/datasets/rlds/oxe/configs.py
+@@ -670,6 +670,13 @@ OXE_DATASET_CONFIGS = {
+         "state_encoding": StateEncoding.POS_EULER,
+         "action_encoding": ActionEncoding.EEF_POS,
+     },
++    "forge_dataset": {  # Trossen lift-eggplant; 7-DoF joint actions declared as EEF_POS for materialize compat
++        "image_obs_keys": {"primary": "cam_main_image", "secondary": None, "wrist": "cam_wrist_image"},
++        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
++        "state_obs_keys": [None, None, None, None, None, None, None, None],
++        "state_encoding": StateEncoding.NONE,
++        "action_encoding": ActionEncoding.EEF_POS,
++    },
+     "libero_4_task_suites_no_noops": {
+         "image_obs_keys": {"primary": "image", "secondary": None, "wrist": "wrist_image"},
+         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+diff --git a/prismatic/vla/datasets/rlds/oxe/mixtures.py b/prismatic/vla/datasets/rlds/oxe/mixtures.py
+index c5a2862..8114aa0 100644
+--- a/prismatic/vla/datasets/rlds/oxe/mixtures.py
++++ b/prismatic/vla/datasets/rlds/oxe/mixtures.py
+@@ -226,5 +226,8 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
+     "aloha1_put_X_into_pot_300_demos": [
+         ("aloha1_put_X_into_pot_300_demos", 1.0),
+     ],
++    "forge_dataset": [
++        ("forge_dataset", 1.0),
++    ],
+ # fmt: on
+ }
+diff --git a/prismatic/vla/datasets/rlds/oxe/transforms.py b/prismatic/vla/datasets/rlds/oxe/transforms.py
+index bf848e9..35068d9 100644
+--- a/prismatic/vla/datasets/rlds/oxe/transforms.py
++++ b/prismatic/vla/datasets/rlds/oxe/transforms.py
+@@ -824,6 +824,12 @@ def tdroid_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+     return trajectory
+ 
+ 
++def forge_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
++    traj_len = tf.shape(trajectory["action"])[0]
++    trajectory["language_instruction"] = tf.repeat(tf.constant("lift the eggplant"), traj_len)
++    return trajectory
++
++
+ def libero_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+     # gripper action is in -1 (open)...1 (close) --> clip to 0...1, flip --> +1 = open, 0 = close
+     gripper_action = trajectory["action"][:, -1:]
+@@ -930,4 +936,5 @@ OXE_STANDARDIZATION_TRANSFORMS = {
+     "aloha1_fold_shirt_30_demos": aloha_dataset_transform,
+     "aloha1_scoop_X_into_bowl_45_demos": aloha_dataset_transform,
+     "aloha1_put_X_into_pot_300_demos": aloha_dataset_transform,
++    "forge_dataset": forge_dataset_transform,
+ }

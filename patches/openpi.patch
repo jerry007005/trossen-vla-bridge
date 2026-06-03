@@ -1,0 +1,117 @@
+diff --git a/src/openpi/training/config.py b/src/openpi/training/config.py
+index 4ca47e1..098045c 100644
+--- a/src/openpi/training/config.py
++++ b/src/openpi/training/config.py
+@@ -20,6 +20,7 @@ import openpi.models.tokenizer as _tokenizer
+ import openpi.policies.aloha_policy as aloha_policy
+ import openpi.policies.droid_policy as droid_policy
+ import openpi.policies.libero_policy as libero_policy
++import openpi.policies.trossen_policy as trossen_policy
+ import openpi.shared.download as _download
+ import openpi.shared.normalize as _normalize
+ import openpi.training.droid_rlds_dataset as droid_rlds_dataset
+@@ -278,6 +279,58 @@ class LeRobotAlohaDataConfig(DataConfigFactory):
+         )
+ 
+ 
++@dataclasses.dataclass(frozen=True)
++class LeRobotTrossenDataConfig(DataConfigFactory):
++    """DataConfig for our merged Trossen lift-eggplant LeRobot dataset.
++
++    The dataset lives at $HF_LEROBOT_HOME/local/trossen_lift_eggplant and has:
++      observation.images.cam_main, observation.images.cam_wrist  (uint8 H,W,C 480x640x3)
++      observation.state  (7,)
++      action             (7,)  -- 6 arm joints + 1 gripper, absolute joint positions
++    """
++
++    use_delta_joint_actions: bool = True
++
++    @override
++    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
++        repack_transform = _transforms.Group(
++            inputs=[
++                _transforms.RepackTransform(
++                    {
++                        "observation/image": "observation.images.cam_main",
++                        "observation/wrist_image": "observation.images.cam_wrist",
++                        "observation/state": "observation.state",
++                        "actions": "action",
++                        "prompt": "prompt",
++                    }
++                )
++            ]
++        )
++
++        data_transforms = _transforms.Group(
++            inputs=[trossen_policy.TrossenInputs(model_type=model_config.model_type)],
++            outputs=[trossen_policy.TrossenOutputs()],
++        )
++
++        if self.use_delta_joint_actions:
++            # First 6 joints -> delta wrt current state; gripper (last dim) stays absolute.
++            delta_action_mask = _transforms.make_bool_mask(6, -1)
++            data_transforms = data_transforms.push(
++                inputs=[_transforms.DeltaActions(delta_action_mask)],
++                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
++            )
++
++        model_transforms = ModelTransformFactory()(model_config)
++
++        return dataclasses.replace(
++            self.create_base_config(assets_dirs, model_config),
++            repack_transforms=repack_transform,
++            data_transforms=data_transforms,
++            model_transforms=model_transforms,
++            action_sequence_keys=("action",),
++        )
++
++
+ @dataclasses.dataclass(frozen=True)
+ class LeRobotLiberoDataConfig(DataConfigFactory):
+     """
+@@ -696,6 +749,33 @@ _CONFIGS = [
+         # Turn off EMA for LoRA finetuning.
+         ema_decay=None,
+     ),
++    #
++    # Fine-tuning Trossen lift-eggplant configs.
++    #
++    TrainConfig(
++        name="pi0_trossen_lift_eggplant",
++        model=pi0_config.Pi0Config(),
++        data=LeRobotTrossenDataConfig(
++            repo_id="local/trossen_lift_eggplant",
++            base_config=DataConfig(prompt_from_task=True),
++        ),
++        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
++        num_train_steps=30_000,
++    ),
++    TrainConfig(
++        name="pi0_trossen_lift_eggplant_low_mem_finetune",
++        model=pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
++        data=LeRobotTrossenDataConfig(
++            repo_id="local/trossen_lift_eggplant",
++            base_config=DataConfig(prompt_from_task=True),
++        ),
++        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
++        num_train_steps=30_000,
++        freeze_filter=pi0_config.Pi0Config(
++            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
++        ).get_freeze_filter(),
++        ema_decay=None,
++    ),
+     TrainConfig(
+         name="pi0_fast_libero",
+         # Here is an example of loading a pi0-FAST model for full finetuning.
+diff --git a/src/openpi/training/data_loader.py b/src/openpi/training/data_loader.py
+index e2ee7dd..cbf92bc 100644
+--- a/src/openpi/training/data_loader.py
++++ b/src/openpi/training/data_loader.py
+@@ -143,6 +143,7 @@ def create_torch_dataset(
+         delta_timestamps={
+             key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
+         },
++        video_backend="pyav",
+     )
+ 
+     if data_config.prompt_from_task:

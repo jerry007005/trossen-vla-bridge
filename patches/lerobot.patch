@@ -1,0 +1,29 @@
+diff --git a/lerobot/common/robot_devices/robots/configs.py b/lerobot/common/robot_devices/robots/configs.py
+index 9b650ad..5115b3d 100644
+--- a/lerobot/common/robot_devices/robots/configs.py
++++ b/lerobot/common/robot_devices/robots/configs.py
+@@ -800,7 +800,7 @@ class TrossenAISoloRobotConfig(ManipulatorRobotConfig):
+ 
+         self.follower_arms = {
+             "main": TrossenArmDriverConfig(
+-                ip="192.168.1.3",
++                ip="192.168.1.4",
+                 model="V0_FOLLOWER",
+                 min_time_to_move_multiplier=self.min_time_to_move_multiplier,
+             ),
+@@ -828,13 +828,13 @@ class TrossenAISoloRobotConfig(ManipulatorRobotConfig):
+             # on another USB hub or PCIe card.
+             self.cameras: dict[str, CameraConfig] = {
+                 "cam_main": IntelRealSenseCameraConfig(
+-                    serial_number=130322270184,
++                    serial_number=838212073584,
+                     fps=30,
+                     width=640,
+                     height=480,
+                 ),
+                 "cam_wrist": IntelRealSenseCameraConfig(
+-                    serial_number=218622274938,
++                    serial_number=409122274608,
+                     fps=30,
+                     width=640,
+                     height=480,

@@ -1,0 +1,39 @@
+diff --git a/prismatic/vla/datasets/rlds/oxe/configs.py b/prismatic/vla/datasets/rlds/oxe/configs.py
+index 2b8dcb9..f6c77a0 100644
+--- a/prismatic/vla/datasets/rlds/oxe/configs.py
++++ b/prismatic/vla/datasets/rlds/oxe/configs.py
+@@ -670,4 +670,11 @@ OXE_DATASET_CONFIGS = {
+         "state_encoding": StateEncoding.POS_EULER,
+         "action_encoding": ActionEncoding.EEF_POS,
+     },
++    "forge_dataset": {
++        "image_obs_keys": {"primary": "cam_main_image", "secondary": None, "wrist": "cam_wrist_image"},
++        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
++        "state_obs_keys": [None, None, None, None, None, None, None, None],
++        "state_encoding": StateEncoding.NONE,
++        "action_encoding": ActionEncoding.EEF_POS,
++    },
+ }
+diff --git a/prismatic/vla/datasets/rlds/oxe/transforms.py b/prismatic/vla/datasets/rlds/oxe/transforms.py
+index cc9c687..77ef7e5 100644
+--- a/prismatic/vla/datasets/rlds/oxe/transforms.py
++++ b/prismatic/vla/datasets/rlds/oxe/transforms.py
+@@ -824,6 +824,12 @@ def tdroid_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+     return trajectory
+ 
+ 
++def forge_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
++    traj_len = tf.shape(trajectory["action"])[0]
++    trajectory["language_instruction"] = tf.repeat(tf.constant("lift the eggplant"), traj_len)
++    return trajectory
++
++
+ def libero_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+     # gripper action is in -1 (open)...1 (close) --> clip to 0...1, flip --> +1 = open, 0 = close
+     gripper_action = trajectory["action"][:, -1:]
+@@ -919,4 +925,5 @@ OXE_STANDARDIZATION_TRANSFORMS = {
+     "libero_object_no_noops": libero_dataset_transform,
+     "libero_goal_no_noops": libero_dataset_transform,
+     "libero_10_no_noops": libero_dataset_transform,
++    "forge_dataset": forge_dataset_transform,
+ }
