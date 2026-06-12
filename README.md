@@ -141,6 +141,8 @@ trossen-client --mode autonomous \
     --task-prompt "lift the eggplant" \
     --server-host <server-ip> --server-port 8000 \
     --max-steps 60
+
+# For pi0 add --no-anchor-offset (see "Action coord. frame" below).
 ```
 
 ### Sanity-check the protocol without any robot
@@ -165,6 +167,59 @@ trossen-client --connect-only \
 `--with-leader` re-enables the leader arm (needed only for teleop, not for
 autonomous policy execution). `--camera-interface opencv` switches off
 RealSense and uses /dev/video* indices instead.
+
+## Action coord. frame (anchor offset)
+
+OpenVLA-7B and OpenVLA-OFT, the way we registered `forge_dataset` in their
+RLDS pipeline (`ActionEncoding.EEF_POS`), emit **absolute joint targets in the
+training-data coordinate frame** — i.e. they say "send joint 1 to 1.85 rad",
+not "rotate joint 1 by +0.05 rad". If the physical arm you're deploying on has
+a different motor-zero calibration than the arm the data was collected with
+(even the same Trossen AI Solo model), those absolute targets send it to the
+wrong physical pose.
+
+π₀ avoids this because our `LeRobotTrossenDataConfig` sets
+`use_delta_joint_actions=True` and uses openpi's `AbsoluteActions` output
+transform: π₀ predicts deltas internally and rebuilds an absolute target by
+adding the robot's current state. That makes π₀ calibration-invariant.
+
+To get the same behaviour for OpenVLA / OFT without retraining, the client
+applies an **anchor offset**: at the first inference of each episode, it
+computes
+
+```
+offset = robot.actual_state - first_predicted_action
+```
+
+and adds that same constant to every subsequent action in every subsequent
+chunk. The model's trajectory shape is preserved; only the absolute frame is
+shifted so the first commanded target lands on the robot's true starting pose.
+
+```bash
+# default: anchor offset ON  (correct for OpenVLA / OFT)
+trossen-client --mode autonomous --task-prompt "lift the eggplant" ...
+
+# disable for π₀ (and for any other model trained directly on delta actions)
+trossen-client --mode autonomous --task-prompt "lift the eggplant" \
+    ... --no-anchor-offset
+```
+
+The first inference of each episode logs the offset:
+
+```
+Anchor offset (state - first predicted): [+0.45, -0.71, -0.32, -1.6, ...]
+```
+
+- Offset values of several rad on most joints ⇒ calibration mismatch was indeed
+  significant; the offset is doing real work.
+- Offset values < 0.1 rad on all joints ⇒ calibration was already close, and
+  any remaining problem is elsewhere (joint ordering, sign convention, ...).
+
+Limitations: the offset is fixed for the whole episode, so it cannot fix
+drift that the model itself produces, nor can it correct a joint whose axis
+direction is flipped. If you have a joint that the model trained to rotate
+positive but on your arm rotates negative, you need a sign flip — that lives
+outside this re-anchoring scheme.
 
 ## Safety
 
