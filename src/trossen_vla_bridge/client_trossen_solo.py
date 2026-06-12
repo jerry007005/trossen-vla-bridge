@@ -57,6 +57,7 @@ class TrossenSoloPolicyBridge:
         no_leader: bool = True,
         cam_main_serial: str | None = None,
         cam_wrist_serial: str | None = None,
+        use_anchor_offset: bool = True,
     ) -> None:
         if mode not in {"autonomous", "test"}:
             raise ValueError(f"mode must be 'autonomous' or 'test'; got {mode!r}")
@@ -66,6 +67,7 @@ class TrossenSoloPolicyBridge:
         self.rate_of_inference = rate_of_inference
         self.max_steps = max_steps
         self.send_wrist = send_wrist
+        self.use_anchor_offset = use_anchor_offset
 
         log.info("Connecting to policy server %s:%d", server_host, server_port)
         self.policy = WebsocketClientPolicy(host=server_host, port=server_port)
@@ -111,6 +113,17 @@ class TrossenSoloPolicyBridge:
         # buffer of (step -> list of candidate actions), used for temporal
         # ensembling if you later switch it on.
         self.action_buffer: Dict[int, List[np.ndarray]] = defaultdict(list)
+
+        # Absolute-target frame alignment:
+        # OpenVLA / OpenVLA-OFT emit absolute joint targets in the *training
+        # data's* coordinate frame. If your physical arm's zero pose differs
+        # from the data-collection arm's zero pose, those absolute targets
+        # send the arm to the wrong physical pose. We anchor the trajectory
+        # to the robot's actual starting state at episode start: every
+        # subsequent predicted action gets the same constant offset added.
+        # pi0 already does this internally (delta + AbsoluteActions output),
+        # so for pi0 you should pass --no-anchor-offset.
+        self.anchor_offset: np.ndarray | None = None  # set in run_episode
 
     # ------------------------------------------------------------------ obs
 
@@ -186,8 +199,10 @@ class TrossenSoloPolicyBridge:
         self.episode_step = 0
         self.current_chunk = None
         self.chunk_idx = 0
-        log.info("Starting episode (mode=%s, prompt=%r, max_steps=%d)",
-                 self.mode, task_prompt, self.max_steps)
+        self.anchor_offset = None
+        log.info("Starting episode (mode=%s, prompt=%r, max_steps=%d, anchor_offset=%s)",
+                 self.mode, task_prompt, self.max_steps,
+                 "on" if self.use_anchor_offset else "off")
 
         while self.episode_step < self.max_steps:
             tick = time.perf_counter()
@@ -199,7 +214,26 @@ class TrossenSoloPolicyBridge:
             if need_new_chunk:
                 obs = self._read_obs()
                 resp = self.policy.infer(obs)
-                self.current_chunk = np.asarray(resp["actions"], dtype=np.float32)
+                raw_chunk = np.asarray(resp["actions"], dtype=np.float32)
+
+                # On the FIRST query of the episode, compute a constant offset
+                # so that raw_chunk[0] becomes equal to the robot's actual
+                # current joint state. We then add that same offset to every
+                # action in every subsequent chunk for the rest of the episode.
+                # This converts the model's absolute joint targets into a
+                # trajectory shape that's re-anchored to the robot's reality.
+                # Disable with --no-anchor-offset (use for pi0, which already
+                # outputs state-anchored actions via its AbsoluteActions
+                # transform).
+                if self.use_anchor_offset and self.anchor_offset is None:
+                    self.anchor_offset = obs["state"].astype(np.float32) - raw_chunk[0]
+                    log.info("Anchor offset (state - first predicted): %s",
+                             np.round(self.anchor_offset, 4))
+
+                if self.anchor_offset is not None:
+                    raw_chunk = raw_chunk + self.anchor_offset[None, :]
+
+                self.current_chunk = raw_chunk
                 self.chunk_idx = 0
                 log.info(
                     "step=%d  query  chunk=%s  server_timing=%s",
@@ -256,6 +290,13 @@ def main() -> None:
     parser.add_argument("--connect-only", action="store_true",
                         help="Connect to robot, print one observation, disconnect. "
                              "Does NOT touch the policy server or motors.")
+    parser.add_argument("--no-anchor-offset", action="store_true",
+                        help="Disable the absolute→state-anchored offset hack. "
+                             "OpenVLA / OpenVLA-OFT predict absolute joint targets "
+                             "in the training-data coordinate frame; we re-anchor "
+                             "them to the robot's actual init pose by default. "
+                             "Pass this for pi0 (which already does it internally) "
+                             "or for any model trained on delta actions.")
     args = parser.parse_args()
 
     if args.connect_only:
@@ -302,6 +343,7 @@ def main() -> None:
         no_leader=not args.with_leader,
         cam_main_serial=args.cam_main_serial,
         cam_wrist_serial=args.cam_wrist_serial,
+        use_anchor_offset=not args.no_anchor_offset,
     )
     try:
         bridge.run_episode(args.task_prompt)
