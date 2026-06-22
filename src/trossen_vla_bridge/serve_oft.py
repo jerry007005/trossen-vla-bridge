@@ -78,7 +78,6 @@ class OpenVLAOFTPolicy(BasePolicy):
         unnorm_key: str = "forge_dataset",
         primary_image_key: str = "cam_main",
         wrist_image_key: str = "cam_wrist",
-        delta_corrected: bool = False,
     ) -> None:
         ckpt = _resolve_checkpoint(checkpoint)
         self.cfg = GenerateConfig(
@@ -99,14 +98,12 @@ class OpenVLAOFTPolicy(BasePolicy):
         self.processor = get_processor(self.cfg)
         self.primary_image_key = primary_image_key
         self.wrist_image_key = wrist_image_key
-        self.delta_corrected = delta_corrected
         log.info(
-            "OFT ready: chunk=%d action_dim=%d primary=%s wrist=%s delta_corrected=%s",
+            "OFT ready: chunk=%d action_dim=%d primary=%s wrist=%s",
             NUM_ACTIONS_CHUNK,
             ACTION_DIM,
             primary_image_key,
             wrist_image_key,
-            delta_corrected,
         )
 
     def infer(self, obs: dict) -> dict:
@@ -150,17 +147,16 @@ class OpenVLAOFTPolicy(BasePolicy):
         # `actions` is a list of NUM_ACTIONS_CHUNK numpy arrays, each (ACTION_DIM,)
         actions = np.stack(actions, axis=0).astype(np.float32)
 
-        # If the checkpoint was trained with forge_dataset_transform doing
-        # `action[:, :6] -= state[:, :6]`, add state back to every step in the
-        # chunk so the client receives absolute joint targets (calibration-invariant).
-        if self.delta_corrected:
-            state = obs.get("state")
-            if state is None:
-                raise KeyError("delta_corrected=True requires obs['state']")
-            state = np.asarray(state, dtype=np.float32)
-            if state.shape[0] < 6:
-                raise ValueError(f"state must have >=6 dims; got {state.shape}")
-            actions[:, :6] = actions[:, :6] + state[None, :6]
+        # Add state back to every step's arm dims to reconstruct absolute joint
+        # targets. forge_dataset_transform subtracted state from action[:, :6]
+        # during training, so the model output here is a per-step arm delta.
+        state = obs.get("state")
+        if state is None:
+            raise KeyError("obs['state'] is required (model is delta-trained)")
+        state = np.asarray(state, dtype=np.float32)
+        if state.shape[0] < 6:
+            raise ValueError(f"state must have >=6 dims; got {state.shape}")
+        actions[:, :6] = actions[:, :6] + state[None, :6]
 
         return {"actions": actions}
 
@@ -177,10 +173,6 @@ def main() -> None:
     parser.add_argument("--unnorm-key", default="forge_dataset")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--delta-corrected", action="store_true",
-                        help="The checkpoint was trained with forge_dataset_transform "
-                             "subtracting state from arm action dims. Add state back here "
-                             "so the client receives absolute joint targets.")
     args = parser.parse_args()
 
     policy = OpenVLAOFTPolicy(
@@ -188,7 +180,6 @@ def main() -> None:
         unnorm_key=args.unnorm_key,
         primary_image_key=args.primary_image_key,
         wrist_image_key=args.wrist_image_key,
-        delta_corrected=args.delta_corrected,
     )
     server = WebsocketPolicyServer(
         policy=policy,
