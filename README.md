@@ -221,6 +221,55 @@ direction is flipped. If you have a joint that the model trained to rotate
 positive but on your arm rotates negative, you need a sign flip — that lives
 outside this re-anchoring scheme.
 
+## Delta-action training (`--delta-corrected`)
+
+The anchor offset above is a deployment-time band-aid. The proper fix is to
+train OpenVLA / OpenVLA-OFT on **deltas** to begin with, the same way pi0 is
+trained. `patches/openvla.patch` and `patches/openvla_oft.patch` now do this
+inside `forge_dataset_transform`:
+
+```python
+# Per-step pre-transform: arm joints become deltas, gripper stays absolute.
+arm_delta = action[:, :6] - state[:, :6]
+gripper   = action[:, 6:7]
+trajectory["action"] = tf.concat([arm_delta, gripper], axis=-1)
+```
+
+The dataset_statistics recomputed during training now describe the
+**delta distribution** for arm joints (≈ ±0.05 rad/step) instead of the absolute
+joint range. The model learns small relative motions, identical in spirit to
+pi0's `use_delta_joint_actions=True`.
+
+At inference, the server must add the state back to reconstruct an absolute
+joint target — pass `--delta-corrected` to the server:
+
+```bash
+# Server (use after retraining with the new transforms.py)
+trossen-serve-openvla --checkpoint <ckpt> --port 8000 --delta-corrected
+trossen-serve-oft     --checkpoint <ckpt> --port 8000 --delta-corrected
+
+# Client (no special flag needed; the server's output is already absolute)
+trossen-client --mode autonomous --task-prompt "..." --no-anchor-offset
+```
+
+Why also `--no-anchor-offset` on the client: with delta training, the model
+output (after server-side state-add-back) is already a calibration-invariant
+absolute target. The anchor offset would do nothing useful and could fight the
+delta correction. For old (non-delta) checkpoints, leave anchor offset on and
+omit `--delta-corrected`.
+
+**Recipe to retrain**:
+
+1. Make sure your local `_envs/openvla{,-oft}` clone has the latest patch
+   applied (`./scripts/setup_*.sh` reapplies it on a clean install).
+2. Delete any pre-existing `dataset_statistics.json` from the run dir if you're
+   keeping the same `--run_id_note`; otherwise the loader will reuse stale
+   absolute-action stats. Easiest: use a fresh `--run_id_note` like
+   `--delta`.
+3. Train as usual; the stats are auto-recomputed on the new (delta) data.
+4. Deploy with `--delta-corrected` on the server and `--no-anchor-offset` on
+   the client.
+
 ## Safety
 
 `prismatic/.../TrossenAISoloRobotConfig` caps every motor command at

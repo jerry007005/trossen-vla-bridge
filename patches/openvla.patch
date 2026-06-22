@@ -15,23 +15,34 @@ index 2b8dcb9..f6c77a0 100644
 +    },
  }
 diff --git a/prismatic/vla/datasets/rlds/oxe/transforms.py b/prismatic/vla/datasets/rlds/oxe/transforms.py
-index cc9c687..77ef7e5 100644
+index cc9c687..5884dd1 100644
 --- a/prismatic/vla/datasets/rlds/oxe/transforms.py
 +++ b/prismatic/vla/datasets/rlds/oxe/transforms.py
-@@ -824,6 +824,12 @@ def tdroid_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+@@ -824,6 +824,23 @@ def tdroid_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
      return trajectory
  
  
 +def forge_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
 +    traj_len = tf.shape(trajectory["action"])[0]
 +    trajectory["language_instruction"] = tf.repeat(tf.constant("lift the eggplant"), traj_len)
++
++    # pi0-style delta transform (equivalent to openpi's use_delta_joint_actions=True).
++    # Arm joints (dim 0-5): action[t] -> action[t] - state[t]  (relative motion)
++    # Gripper (dim 6): kept absolute (model still learns open/close from the raw value).
++    # At inference the server adds state back to dims 0-5 to reconstruct an absolute
++    # joint target (calibration-invariant; same trick pi0 does internally).
++    action = trajectory["action"]
++    state = trajectory["observation"]["state"]
++    arm_delta = action[:, :6] - state[:, :6]
++    gripper = action[:, 6:7]
++    trajectory["action"] = tf.concat([arm_delta, gripper], axis=-1)
 +    return trajectory
 +
 +
  def libero_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
      # gripper action is in -1 (open)...1 (close) --> clip to 0...1, flip --> +1 = open, 0 = close
      gripper_action = trajectory["action"][:, -1:]
-@@ -919,4 +925,5 @@ OXE_STANDARDIZATION_TRANSFORMS = {
+@@ -919,4 +936,5 @@ OXE_STANDARDIZATION_TRANSFORMS = {
      "libero_object_no_noops": libero_dataset_transform,
      "libero_goal_no_noops": libero_dataset_transform,
      "libero_10_no_noops": libero_dataset_transform,

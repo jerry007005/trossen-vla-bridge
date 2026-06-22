@@ -64,6 +64,7 @@ class OpenVLAPolicy(BasePolicy):
         image_key: str = "cam_main",
         unnorm_key: str = "forge_dataset",
         device: str = "cuda",
+        delta_corrected: bool = False,
     ) -> None:
         ckpt = _resolve_checkpoint(checkpoint)
         log.info("Loading processor + model from %s", ckpt)
@@ -97,12 +98,14 @@ class OpenVLAPolicy(BasePolicy):
         self.image_key = image_key
         self.unnorm_key = unnorm_key
         self.device = device
+        self.delta_corrected = delta_corrected
         if unnorm_key not in self.vla.norm_stats:
             raise KeyError(
                 f"unnorm_key {unnorm_key!r} not found in model norm_stats; "
                 f"available: {sorted(self.vla.norm_stats.keys())}"
             )
-        log.info("OpenVLA ready (image_key=%s, unnorm_key=%s)", image_key, unnorm_key)
+        log.info("OpenVLA ready (image_key=%s, unnorm_key=%s, delta_corrected=%s)",
+                 image_key, unnorm_key, delta_corrected)
 
     @torch.no_grad()
     def infer(self, obs: dict) -> dict:
@@ -128,8 +131,22 @@ class OpenVLAPolicy(BasePolicy):
         action = self.vla.predict_action(
             **inputs, unnorm_key=self.unnorm_key, do_sample=False
         )
-        action = np.asarray(action, dtype=np.float32).reshape(1, -1)  # chunk size = 1
-        return {"actions": action}
+        action = np.asarray(action, dtype=np.float32)  # (7,)
+
+        # If the checkpoint was trained on delta arm actions (forge_dataset_transform
+        # subtracted state from the first 6 dims), add state back here to reconstruct
+        # the absolute joint target. Gripper dim 6 stays as-is (it was absolute in
+        # both training and the model output).
+        if self.delta_corrected:
+            state = obs.get("state")
+            if state is None:
+                raise KeyError("delta_corrected=True requires obs['state']")
+            state = np.asarray(state, dtype=np.float32)
+            if state.shape[0] < 6:
+                raise ValueError(f"state must have >=6 dims; got {state.shape}")
+            action[:6] = action[:6] + state[:6]
+
+        return {"actions": action.reshape(1, -1)}  # chunk size = 1
 
 
 def main() -> None:
@@ -143,6 +160,13 @@ def main() -> None:
     parser.add_argument("--unnorm-key", default="forge_dataset")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--delta-corrected", action="store_true",
+                        help="The checkpoint was trained with forge_dataset_transform "
+                             "running action[:,:6] -= state[:,:6]. Reconstruct the "
+                             "absolute joint target by adding state back at inference. "
+                             "Required for any checkpoint trained after PR/commit "
+                             "introducing the delta transform; harmless to omit for "
+                             "older absolute-action checkpoints.")
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
 
@@ -151,6 +175,7 @@ def main() -> None:
         image_key=args.image_key,
         unnorm_key=args.unnorm_key,
         device=args.device,
+        delta_corrected=args.delta_corrected,
     )
     server = WebsocketPolicyServer(
         policy=policy,
