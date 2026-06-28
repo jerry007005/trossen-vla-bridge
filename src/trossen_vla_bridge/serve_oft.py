@@ -5,8 +5,8 @@ forward pass through the LoRA-merged base + a separate L1 regression head.
 
 Run (use openvla-oft's venv on a CUDA box):
     python serve_oft.py \
-        --checkpoint UoA-Trossen-Arm/openvla-7b-oft-lift-eggplant \
-        --unnorm-key forge_dataset --port 8000
+        --checkpoint UoA-Trossen-Arm/openvla-7b-oft-trossen-6task \
+        --unnorm-key trossen_6task_combined --port 8000
 """
 from __future__ import annotations
 
@@ -165,12 +165,12 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--checkpoint",
-        default="UoA-Trossen-Arm/openvla-7b-oft-lift-eggplant",
+        default="UoA-Trossen-Arm/openvla-7b-oft-trossen-6task",
         help="HF repo id or local checkpoint dir",
     )
     parser.add_argument("--primary-image-key", default="cam_main")
     parser.add_argument("--wrist-image-key", default="cam_wrist")
-    parser.add_argument("--unnorm-key", default="forge_dataset")
+    parser.add_argument("--unnorm-key", default="trossen_6task_combined")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()

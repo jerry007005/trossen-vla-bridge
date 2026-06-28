@@ -7,13 +7,18 @@ trossen-ai fork (`lerobot.common.robot_devices.*`), forwards to a policy
 server, and replays the returned action chunk on the follower arm.
 
 Run (in /node-shared/jerry007005/haochuan/lerobot/.venv):
+    # No --task-prompt: an interactive picker prompts you to choose one of the
+    # 6 trained task strings (or type a custom one) at startup.
+    python client_trossen_solo.py --mode test --server-host localhost --server-port 8000
+
+    # Specify the task directly:
     python client_trossen_solo.py \
-        --mode test                  \
-        --task-prompt "lift the eggplant"      \
+        --mode test --task-prompt "pick up the carrot and place it in the plate" \
         --server-host localhost --server-port 8000
 
     # Real motion (DO NOT RUN until the model is verified safe):
-    python client_trossen_solo.py --mode autonomous --task-prompt "lift the eggplant"
+    python client_trossen_solo.py --mode autonomous \
+        --task-prompt "lift the pineapple"
 """
 from __future__ import annotations
 
@@ -226,11 +231,47 @@ class TrossenSoloPolicyBridge:
             log.warning("Robot disconnect raised: %s", exc)
 
 
+# The six task strings that the 6-task pi0 / OFT models were trained on.
+# Order matches merge_6task_lerobot.py task_index assignment.
+TROSSEN_6TASK_PROMPTS = (
+    "lift the eggplant",
+    "lift the carrot",
+    "pick up the carrot and place it in the plate",
+    "lift the pineapple",
+    "pick up the eggplant and place it in the plate",
+    "pick up the pineapple and place it in the plate",
+)
+
+
+def _pick_task_prompt_interactively() -> str:
+    """Show the six known task prompts and let the user pick one (or type a custom string)."""
+    print("\nPick a task instruction (the trained models were finetuned on these 6):")
+    for i, p in enumerate(TROSSEN_6TASK_PROMPTS, start=1):
+        print(f"  [{i}] {p}")
+    print("  [c] (custom) — type your own")
+    while True:
+        choice = input("Enter 1-6 or c: ").strip().lower()
+        if choice in {str(i) for i in range(1, len(TROSSEN_6TASK_PROMPTS) + 1)}:
+            prompt = TROSSEN_6TASK_PROMPTS[int(choice) - 1]
+            print(f"Using: {prompt!r}")
+            return prompt
+        if choice == "c":
+            custom = input("Custom prompt: ").strip()
+            if custom:
+                return custom
+            print("Empty input, try again.")
+            continue
+        print(f"Invalid choice {choice!r}, try again.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["autonomous", "test"], default="test",
                         help="`test` reads obs + queries server but does NOT move the arm")
-    parser.add_argument("--task-prompt", default="lift the eggplant")
+    parser.add_argument("--task-prompt", default=None,
+                        help="Task instruction sent with every observation. If omitted, "
+                             "an interactive picker is shown at startup with the 6 "
+                             "Trossen 6-task prompts.")
     parser.add_argument("--server-host", default="localhost")
     parser.add_argument("--server-port", type=int, default=8000)
     parser.add_argument("--control-frequency", type=int, default=30)
@@ -304,7 +345,8 @@ def main() -> None:
         cam_wrist_serial=args.cam_wrist_serial,
     )
     try:
-        bridge.run_episode(args.task_prompt)
+        prompt = args.task_prompt if args.task_prompt is not None else _pick_task_prompt_interactively()
+        bridge.run_episode(prompt)
     finally:
         bridge.shutdown()
 

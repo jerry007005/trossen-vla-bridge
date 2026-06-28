@@ -37,10 +37,27 @@ its query cadence (every `chunk_size` action steps → re-query).
 | `serve_oft.py` | 20 | cam_main + cam_wrist | ~95 ms / query |
 | `serve_pi0.py` | 50 | cam_main + cam_wrist | ~48 ms / query |
 
-The corresponding HF checkpoints (private, default repo IDs in the server scripts):
-- `UoA-Trossen-Arm/openvla-7b-lift-eggplant` — merged
-- `UoA-Trossen-Arm/openvla-7b-oft-lift-eggplant` — merged + L1 action head
-- `UoA-Trossen-Arm/pi0-lift-eggplant-pytorch` — PyTorch port
+The default HF checkpoints (private) are the **6-task** finetunes:
+
+- `UoA-Trossen-Arm/pi0-trossen-6task` — pi0 PyTorch port (step 39k)
+- `UoA-Trossen-Arm/openvla-7b-oft-trossen-6task` — OpenVLA-OFT, merged base + L1 action head + proprio projector (step 195k)
+- `UoA-Trossen-Arm/openvla-7b-lift-eggplant` — original single-task vanilla OpenVLA (legacy default; pass `--checkpoint` to override)
+
+The 6-task models were trained on these instruction strings — pick whichever
+one matches your current scene at inference time:
+
+| task_index | Instruction |
+|---|---|
+| 0 | `lift the eggplant` |
+| 1 | `lift the carrot` |
+| 2 | `pick up the carrot and place it in the plate` |
+| 3 | `lift the pineapple` |
+| 4 | `pick up the eggplant and place it in the plate` |
+| 5 | `pick up the pineapple and place it in the plate` |
+
+Older single-task checkpoints (`pi0-lift-eggplant-pytorch`,
+`openvla-7b-oft-lift-eggplant`) still load — pass `--checkpoint`
+(and matching `--config-name` for pi0, `--unnorm-key` for OFT).
 
 ## Layout
 
@@ -130,15 +147,21 @@ trossen-client --connect-only
 # expect: joint state shape (7,), two RGB images at (480, 640, 3)
 
 # Step B — dry-run with the policy server (reads obs, queries server, prints
-# actions; motors stay still)
+# actions; motors stay still). Omit --task-prompt to pick interactively.
 trossen-client --mode test \
-    --task-prompt "lift the eggplant" \
+    --server-host <server-ip> --server-port 8000 \
+    --max-steps 30
+# -> prompts you to pick one of the 6 trained tasks (or type a custom one)
+
+# Or pass the task on the CLI:
+trossen-client --mode test \
+    --task-prompt "pick up the carrot and place it in the plate" \
     --server-host <server-ip> --server-port 8000 \
     --max-steps 30
 
 # Step C — autonomous (real motion; have the E-stop ready)
 trossen-client --mode autonomous \
-    --task-prompt "lift the eggplant" \
+    --task-prompt "lift the pineapple" \
     --server-host <server-ip> --server-port 8000 \
     --max-steps 60
 ```

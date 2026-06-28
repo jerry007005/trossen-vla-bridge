@@ -4,8 +4,8 @@ The pi0 model returns a chunk of 50 × 7 action steps per forward pass.
 
 Run (use openpi's venv):
     python serve_pi0.py \
-        --checkpoint UoA-Trossen-Arm/pi0-lift-eggplant-pytorch \
-        --config-name pi0_trossen_lift_eggplant_low_mem_finetune \
+        --checkpoint UoA-Trossen-Arm/pi0-trossen-6task \
+        --config-name pi0_trossen_6task_low_mem_finetune \
         --port 8000
 
 NOTE: this venv pins torch==2.7.1, which lacks Blackwell (sm_120) kernels — on a
@@ -114,8 +114,8 @@ class Pi0Policy(BasePolicy):
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--checkpoint", default="UoA-Trossen-Arm/pi0-lift-eggplant-pytorch")
-    p.add_argument("--config-name", default="pi0_trossen_lift_eggplant_low_mem_finetune")
+    p.add_argument("--checkpoint", default="UoA-Trossen-Arm/pi0-trossen-6task")
+    p.add_argument("--config-name", default="pi0_trossen_6task_low_mem_finetune")
     p.add_argument("--primary-image-key", default="cam_main")
     p.add_argument("--wrist-image-key", default="cam_wrist")
     p.add_argument("--host", default="0.0.0.0")
