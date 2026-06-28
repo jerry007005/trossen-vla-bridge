@@ -1,0 +1,60 @@
+#!/bin/bash --login
+#SBATCH --job-name=smoke-pi0-6task
+#SBATCH --time=00:30:00
+#SBATCH --gres=gpu:1
+#SBATCH --constraint=h200
+#SBATCH --nodelist=porcini
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
+#SBATCH --output=/node-shared/jerry007005/haochuan/trossen_vla_bridge/slurm_logs/%x-%j.out
+#SBATCH --error=/node-shared/jerry007005/haochuan/trossen_vla_bridge/slurm_logs/%x-%j.err
+
+set -euo pipefail
+[[ -f ~/.bashrc ]] && source ~/.bashrc
+
+mkdir -p /node-shared/jerry007005/haochuan/trossen_vla_bridge/slurm_logs
+
+export HF_LEROBOT_HOME=/node-shared/jerry007005/haochuan/lerobot_home
+export HF_HOME=/node-shared/jerry007005/huggingface
+export OPENPI_DATA_HOME=/node-shared/jerry007005/openpi_cache
+
+cd /node-shared/jerry007005/haochuan/openpi
+source .venv/bin/activate
+
+echo "Node: $(hostname)"
+nvidia-smi -L
+
+cd /node-shared/jerry007005/haochuan/trossen_vla_bridge
+python3 - <<'PY'
+import sys, numpy as np
+sys.path.insert(0, "src")
+from trossen_vla_bridge.serve_pi0 import Pi0Policy
+
+print(">>> instantiating Pi0Policy with the new bridge defaults")
+policy = Pi0Policy(
+    checkpoint="UoA-Trossen-Arm/pi0-trossen-6task",
+    config_name="pi0_trossen_6task_low_mem_finetune",
+)
+
+print("\n>>> sending one synthetic obs through .infer for each of the 6 prompts")
+prompts = [
+    "lift the eggplant",
+    "lift the carrot",
+    "pick up the carrot and place it in the plate",
+    "lift the pineapple",
+    "pick up the eggplant and place it in the plate",
+    "pick up the pineapple and place it in the plate",
+]
+state = np.zeros(7, dtype=np.float32)
+img = np.zeros((3, 224, 224), dtype=np.uint8)
+for p in prompts:
+    out = policy.infer({"state": state, "images": {"cam_main": img, "cam_wrist": img}, "prompt": p})
+    a = out["actions"]
+    print(f"  prompt={p!r:60s} -> actions shape={a.shape} dtype={a.dtype} "
+          f"range=[{a.min():+.3f}, {a.max():+.3f}]")
+    assert a.shape == (50, 7), f"expected (50, 7), got {a.shape}"
+    assert a.dtype == np.float32
+    assert np.isfinite(a).all(), "non-finite action values"
+
+print("\n[pi0] smoke test PASSED — model loads, infers, returns (50, 7) finite float32 actions for all 6 prompts.")
+PY

@@ -6,3 +6,4 @@ _envs/
 dist/
 build/
 .uv-cache/
+slurm_logs/
