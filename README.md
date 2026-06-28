@@ -41,7 +41,7 @@ The default HF checkpoints (private) are the **6-task** finetunes:
 
 - `UoA-Trossen-Arm/pi0-trossen-6task` — pi0 PyTorch port (step 39k)
 - `UoA-Trossen-Arm/openvla-7b-oft-trossen-6task` — OpenVLA-OFT, merged base + L1 action head + proprio projector (step 195k)
-- `UoA-Trossen-Arm/openvla-7b-lift-eggplant` — original single-task vanilla OpenVLA (legacy default; pass `--checkpoint` to override)
+- `UoA-Trossen-Arm/openvla-7b-trossen-6task` — vanilla OpenVLA-7B, LoRA-merged (step ~170k)
 
 The 6-task models were trained on these instruction strings — pick whichever
 one matches your current scene at inference time:
@@ -56,8 +56,9 @@ one matches your current scene at inference time:
 | 5 | `pick up the pineapple and place it in the plate` |
 
 Older single-task checkpoints (`pi0-lift-eggplant-pytorch`,
-`openvla-7b-oft-lift-eggplant`) still load — pass `--checkpoint`
-(and matching `--config-name` for pi0, `--unnorm-key` for OFT).
+`openvla-7b-oft-lift-eggplant`, `openvla-7b-lift-eggplant`) still load — pass
+`--checkpoint` (and matching `--config-name` for pi0, `--unnorm-key` for the
+OpenVLA / OFT servers).
 
 ## Layout
 

@@ -6,8 +6,8 @@ every step.
 
 Run (use openvla's venv on a CUDA box):
     python serve_openvla.py \
-        --checkpoint UoA-Trossen-Arm/openvla-7b-lift-eggplant \
-        --unnorm-key forge_dataset --port 8000
+        --checkpoint UoA-Trossen-Arm/openvla-7b-trossen-6task \
+        --unnorm-key trossen_6task_combined --port 8000
 """
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ class OpenVLAPolicy(BasePolicy):
         self,
         checkpoint: str,
         image_key: str = "cam_main",
-        unnorm_key: str = "forge_dataset",
+        unnorm_key: str = "trossen_6task_combined",
         device: str = "cuda",
     ) -> None:
         ckpt = _resolve_checkpoint(checkpoint)
@@ -150,11 +150,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--checkpoint",
-        default="UoA-Trossen-Arm/openvla-7b-lift-eggplant",
+        default="UoA-Trossen-Arm/openvla-7b-trossen-6task",
         help="HF repo id or local checkpoint dir",
     )
     parser.add_argument("--image-key", default="cam_main")
-    parser.add_argument("--unnorm-key", default="forge_dataset")
+    parser.add_argument("--unnorm-key", default="trossen_6task_combined")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--device", default="cuda")
