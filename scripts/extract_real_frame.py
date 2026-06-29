@@ -7,7 +7,7 @@ Frame chosen: episode 10 (eggplant task), step 100 -- mid-trajectory.
 import numpy as np
 import pyarrow.parquet as pq
 from pathlib import Path
-import av, PIL.Image
+import av
 
 ROOT = Path("/node-shared/jerry007005/haochuan/dataset/trossen_6task_combined")
 OUT  = Path("/node-shared/jerry007005/haochuan/trossen_vla_bridge/scripts/_real_frame.npz")
@@ -39,16 +39,11 @@ img_wrist_hwc = decode_frame(ROOT / "videos" / "chunk-000" / "observation.images
 print(f"cam_main shape  = {img_main_hwc.shape}, dtype={img_main_hwc.dtype}, mean={img_main_hwc.mean():.1f}")
 print(f"cam_wrist shape = {img_wrist_hwc.shape}, dtype={img_wrist_hwc.dtype}, mean={img_wrist_hwc.mean():.1f}")
 
-# Resize to 224x224 (what all 3 models expect at the policy interface).
-def resize(img: np.ndarray, size=224) -> np.ndarray:
-    return np.asarray(PIL.Image.fromarray(img).resize((size, size), PIL.Image.BILINEAR), dtype=np.uint8)
-
-main_224  = resize(img_main_hwc)
-wrist_224 = resize(img_wrist_hwc)
-
-# Bridge servers want CHW uint8 (3, 224, 224).
-main_chw  = main_224.transpose(2, 0, 1).copy()
-wrist_chw = wrist_224.transpose(2, 0, 1).copy()
+# Keep the raw 480x640 frame -- the bridge client now forwards full-res to
+# the server so the model's own processor can apply its training-time
+# letterbox + resize pipeline. Just transpose to CHW uint8 for the protocol.
+main_chw  = img_main_hwc.transpose(2, 0, 1).copy()
+wrist_chw = img_wrist_hwc.transpose(2, 0, 1).copy()
 
 np.savez(OUT,
          state=state,
