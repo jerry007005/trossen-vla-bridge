@@ -43,6 +43,17 @@ log = logging.getLogger(__name__)
 
 ACTION_DIM = 7  # 6 arm joints + 1 gripper (matches TROSSEN_CONSTANTS)
 
+# Empirically constant start pose for every episode in trossen_6task_combined
+# (std < 1e-3 rad across all 1200 episodes / 6 tasks). Without resetting to it
+# at the top of each episode the model gets out-of-distribution state on
+# episode 2+ and stalls. Values:
+#   j0 ~ 0       j1 = pi/3 (60°)   j2 = pi/6 (30°)   j3 ~ 0.6284  (36°)
+#   j4 ~ 0       j5 ~ 0            gripper = 0 (open)
+TROSSEN_6TASK_HOME_POSE = np.array(
+    [0.0, 1.0470, 0.5233, 0.6284, 0.0, 0.0, 0.0],
+    dtype=np.float32,
+)
+
 
 class TrossenSoloPolicyBridge:
     """Single-arm Trossen AI Solo bridge to an openpi-client policy server."""
@@ -62,6 +73,7 @@ class TrossenSoloPolicyBridge:
         no_leader: bool = True,
         cam_main_serial: str | None = None,
         cam_wrist_serial: str | None = None,
+        reset_to_home: bool = True,
     ) -> None:
         if mode not in {"autonomous", "test"}:
             raise ValueError(f"mode must be 'autonomous' or 'test'; got {mode!r}")
@@ -71,6 +83,7 @@ class TrossenSoloPolicyBridge:
         self.rate_of_inference = rate_of_inference
         self.max_steps = max_steps
         self.send_wrist = send_wrist
+        self.reset_to_home = reset_to_home
 
         log.info("Connecting to policy server %s:%d", server_host, server_port)
         self.policy = WebsocketClientPolicy(host=server_host, port=server_port)
@@ -186,6 +199,26 @@ class TrossenSoloPolicyBridge:
 
     # ------------------------------------------------------------- run loop
 
+    def _move_to_home(self, n_steps: int = 60) -> None:
+        """Linearly interpolate from the current pose to TROSSEN_6TASK_HOME_POSE
+        over `n_steps` (= 3 s at 20 Hz)."""
+        if self.mode == "test":
+            log.info("[home] skipping reset in test mode")
+            return
+        cur = self._read_obs()["state"]
+        target = TROSSEN_6TASK_HOME_POSE
+        log.info("[home] resetting from %s to %s over %d steps",
+                 np.round(cur, 4).tolist(), target.tolist(), n_steps)
+        for k in range(1, n_steps + 1):
+            tick = time.perf_counter()
+            alpha = k / n_steps
+            mid = (1.0 - alpha) * cur + alpha * target
+            self._send_action(mid.astype(np.float32))
+            elapsed = time.perf_counter() - tick
+            if elapsed < self.dt:
+                time.sleep(self.dt - elapsed)
+        log.info("[home] reset complete")
+
     def run_episode(self, task_prompt: str) -> None:
         self._task_prompt = task_prompt
         self.episode_step = 0
@@ -193,6 +226,8 @@ class TrossenSoloPolicyBridge:
         self.chunk_idx = 0
         log.info("Starting episode (mode=%s, prompt=%r, max_steps=%d)",
                  self.mode, task_prompt, self.max_steps)
+        if self.reset_to_home:
+            self._move_to_home()
 
         while self.episode_step < self.max_steps:
             tick = time.perf_counter()
@@ -302,6 +337,11 @@ def main() -> None:
     parser.add_argument("--connect-only", action="store_true",
                         help="Connect to robot, print one observation, disconnect. "
                              "Does NOT touch the policy server or motors.")
+    parser.add_argument("--no-home-reset", action="store_true",
+                        help="Skip the 3-second linear move-to-home interpolation that "
+                             "normally runs at the top of every episode. Use only if you "
+                             "have already manually teleoperated the arm to the trained "
+                             "home pose (j1 = pi/3, j2 = pi/6, ...).")
     args = parser.parse_args()
 
     if args.connect_only:
@@ -348,6 +388,7 @@ def main() -> None:
         no_leader=not args.with_leader,
         cam_main_serial=args.cam_main_serial,
         cam_wrist_serial=args.cam_wrist_serial,
+        reset_to_home=not args.no_home_reset,
     )
     try:
         prompt = args.task_prompt if args.task_prompt is not None else _pick_task_prompt_interactively()
