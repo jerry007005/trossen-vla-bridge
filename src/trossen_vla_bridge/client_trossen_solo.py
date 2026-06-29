@@ -51,7 +51,7 @@ class TrossenSoloPolicyBridge:
         self,
         server_host: str = "localhost",
         server_port: int = 8000,
-        control_frequency: int = 30,
+        control_frequency: int = 20,
         rate_of_inference: int = 20,
         max_steps: int = 1000,
         mode: str = "test",
@@ -274,7 +274,12 @@ def main() -> None:
                              "Trossen 6-task prompts.")
     parser.add_argument("--server-host", default="localhost")
     parser.add_argument("--server-port", type=int, default=8000)
-    parser.add_argument("--control-frequency", type=int, default=30)
+    parser.add_argument("--control-frequency", type=int, default=20,
+                        help="Hz at which the client sends actions. Must match the "
+                             "training data fps (trossen_6task_combined was collected "
+                             "at 20 Hz, so each step in the policy's action chunk is "
+                             "spaced 50 ms apart; running at 30 Hz replays the chunk "
+                             "1.5x too fast and the arm visibly stalls mid-task).")
     parser.add_argument("--rate-of-inference", type=int, default=20,
                         help="How many chunk actions to consume between queries")
     parser.add_argument("--max-steps", type=int, default=1000)

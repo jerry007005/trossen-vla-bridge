@@ -31,6 +31,14 @@ patch the source, install the bridge.
 `chunk_size` is reported in the server's metadata payload so the client can pick
 its query cadence (every `chunk_size` action steps → re-query).
 
+⚠️ The client must run at the **same control frequency as the training data**
+(`trossen_6task_combined` was collected at **20 Hz**, so default
+`--control-frequency 20`). Bumping the client to 30 Hz replays the chunk
+1.5× too fast: with `max_relative_target=5°` per command the arm can't catch
+up, the next chunk is queried while the state is still mid-motion, and the
+model returns progressively smaller deltas — the arm visibly stalls
+mid-trajectory long before reaching the object.
+
 | Server | chunk_size | input cameras | typical RTT (H200 NVL, after warm-up) |
 | --- | --- | --- | --- |
 | `serve_openvla.py` | 1 | cam_main only | ~190 ms / query |
