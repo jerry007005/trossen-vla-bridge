@@ -73,7 +73,7 @@ class TrossenSoloPolicyBridge:
         no_leader: bool = True,
         cam_main_serial: str | None = None,
         cam_wrist_serial: str | None = None,
-        reset_to_home: bool = True,
+        reset_to_home: bool = False,
     ) -> None:
         if mode not in {"autonomous", "test"}:
             raise ValueError(f"mode must be 'autonomous' or 'test'; got {mode!r}")
@@ -337,11 +337,12 @@ def main() -> None:
     parser.add_argument("--connect-only", action="store_true",
                         help="Connect to robot, print one observation, disconnect. "
                              "Does NOT touch the policy server or motors.")
-    parser.add_argument("--no-home-reset", action="store_true",
-                        help="Skip the 3-second linear move-to-home interpolation that "
-                             "normally runs at the top of every episode. Use only if you "
-                             "have already manually teleoperated the arm to the trained "
-                             "home pose (j1 = pi/3, j2 = pi/6, ...).")
+    parser.add_argument("--reset-to-home", action="store_true",
+                        help="Before the policy loop starts, linearly interpolate from "
+                             "the current pose to the trained home pose "
+                             "(j1=pi/3, j2=pi/6, j3=0.6284, rest=0, gripper open) over "
+                             "3 seconds. Off by default -- enable when starting a fresh "
+                             "episode and the arm is far from the training home pose.")
     args = parser.parse_args()
 
     if args.connect_only:
@@ -388,7 +389,7 @@ def main() -> None:
         no_leader=not args.with_leader,
         cam_main_serial=args.cam_main_serial,
         cam_wrist_serial=args.cam_wrist_serial,
-        reset_to_home=not args.no_home_reset,
+        reset_to_home=args.reset_to_home,
     )
     try:
         prompt = args.task_prompt if args.task_prompt is not None else _pick_task_prompt_interactively()
