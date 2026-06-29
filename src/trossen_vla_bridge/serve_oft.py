@@ -51,6 +51,7 @@ class GenerateConfig:
 from experiments.robot.openvla_utils import (
     get_action_head,
     get_processor,
+    get_proprio_projector,
     get_vla,
     get_vla_action,
 )
@@ -86,15 +87,21 @@ class OpenVLAOFTPolicy(BasePolicy):
             use_diffusion=False,
             use_film=False,
             num_images_in_input=2,
-            use_proprio=False,
+            use_proprio=True,  # 6-task ckpt was TRAINED with use_proprio=True;
+                               # leaving this False silently disabled proprio at
+                               # inference and the model's L1 head fell back to
+                               # near-mean actions (visible as a stalled arm).
             load_in_8bit=False,
             load_in_4bit=False,
             center_crop=True,
             unnorm_key=unnorm_key,
         )
-        log.info("Loading OFT VLA + L1 action head from %s", ckpt)
+        log.info("Loading OFT VLA + L1 action head + proprio projector from %s", ckpt)
         self.vla = get_vla(self.cfg)
         self.action_head = get_action_head(self.cfg, llm_dim=self.vla.llm_dim)
+        self.proprio_projector = get_proprio_projector(
+            self.cfg, llm_dim=self.vla.llm_dim, proprio_dim=ACTION_DIM
+        )
         self.processor = get_processor(self.cfg)
         self.primary_image_key = primary_image_key
         self.wrist_image_key = wrist_image_key
@@ -131,9 +138,21 @@ class OpenVLAOFTPolicy(BasePolicy):
                 )
             return np.transpose(arr, (1, 2, 0)).astype(np.uint8)
 
+        # get_vla_action consumes:
+        #   oft_obs["full_image"]  HWC uint8 primary camera
+        #   oft_obs["wrist_image"] HWC uint8 wrist camera
+        #   oft_obs["state"]       7-D proprio (raw radian state); normalised
+        #                          inside get_vla_action via norm_stats[unnorm_key]["proprio"]
+        state_raw = obs.get("state")
+        if state_raw is None:
+            raise KeyError("obs['state'] is required (model is delta-trained + uses proprio)")
+        state_raw = np.asarray(state_raw, dtype=np.float32)
+        if state_raw.shape[0] < ACTION_DIM:
+            raise ValueError(f"state must have >= {ACTION_DIM} dims; got {state_raw.shape}")
         oft_obs = {
             "full_image": chw_to_hwc(imgs[self.primary_image_key]),
             "wrist_image": chw_to_hwc(imgs[self.wrist_image_key]),
+            "state": state_raw,
         }
         task = obs.get("prompt") or "lift the eggplant"
         actions = get_vla_action(
@@ -143,6 +162,7 @@ class OpenVLAOFTPolicy(BasePolicy):
             oft_obs,
             task_label=task,
             action_head=self.action_head,
+            proprio_projector=self.proprio_projector,
         )
         # `actions` is a list of NUM_ACTIONS_CHUNK numpy arrays, each (ACTION_DIM,)
         actions = np.stack(actions, axis=0).astype(np.float32)
