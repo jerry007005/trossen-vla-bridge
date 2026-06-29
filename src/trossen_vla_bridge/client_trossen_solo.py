@@ -154,7 +154,15 @@ class TrossenSoloPolicyBridge:
             )
         state = np.asarray(joint_vals[:ACTION_DIM], dtype=np.float32)
 
-        # 2. Images: lerobot returns HWC RGB float tensors; we want uint8 CHW @ 224.
+        # 2. Images: lerobot returns HWC RGB float tensors. Send RAW 480x640
+        # CHW uint8 to the server -- do NOT pre-resize. OpenVLA / OFT's
+        # PrismaticImageProcessor uses `image_resize_strategy="letterbox"`,
+        # which pads to a square BEFORE resizing to 224x224. A cv2 stretch
+        # to 224x224 here would silently break that contract -- object
+        # proportions get squashed horizontally, the model goes OOD and
+        # falls back to ~zero deltas (visible as a stalled arm). pi0 happens
+        # to be robust because openpi's image pipeline normalises whatever
+        # size it receives.
         images: dict[str, np.ndarray] = {}
         wanted = ["cam_main"] + (["cam_wrist"] if self.send_wrist else [])
         for cam in wanted:
@@ -171,11 +179,10 @@ class TrossenSoloPolicyBridge:
                 img = (img * 255.0).clip(0, 255).astype(np.uint8)
             if img.ndim == 3 and img.shape[0] in (1, 3):
                 # CHW already
-                img_hwc = np.transpose(img, (1, 2, 0))
+                images[cam] = img
             else:
-                img_hwc = img
-            img_resized = cv2.resize(img_hwc, (224, 224))
-            images[cam] = np.transpose(img_resized, (2, 0, 1))  # CHW
+                # HWC -> CHW
+                images[cam] = np.transpose(img, (2, 0, 1))
 
         return {
             "state":  state,
