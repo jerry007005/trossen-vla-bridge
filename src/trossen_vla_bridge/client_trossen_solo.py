@@ -63,7 +63,7 @@ class TrossenSoloPolicyBridge:
         server_host: str = "localhost",
         server_port: int = 8000,
         control_frequency: int = 20,
-        rate_of_inference: int = 20,
+        rate_of_inference: int = 1,
         max_steps: int = 1000,
         mode: str = "test",
         camera_interface: str = "intel_realsense",
@@ -322,8 +322,17 @@ def main() -> None:
                              "at 20 Hz, so each step in the policy's action chunk is "
                              "spaced 50 ms apart; running at 30 Hz replays the chunk "
                              "1.5x too fast and the arm visibly stalls mid-task).")
-    parser.add_argument("--rate-of-inference", type=int, default=20,
-                        help="How many chunk actions to consume between queries")
+    parser.add_argument("--rate-of-inference", type=int, default=1,
+                        help="How many actions from each chunk to apply before requerying. "
+                             "Default 1 (use only chunk[0] then ask again). This is required "
+                             "for the OFT and openvla checkpoints we ship: their training "
+                             "transform computes per-step delta = action[t+k] - state[t+k], "
+                             "but at inference we only know the CURRENT state, so adding it "
+                             "to every chunk step accumulates an error proportional to k. "
+                             "Only chunk[0] is unbiased. pi0 uses the openpi convention "
+                             "(delta relative to chunk-start state), so re-using a longer "
+                             "chunk is safe -- bump this to e.g. 20 or 50 in that case to "
+                             "get the chunked-policy throughput benefit.")
     parser.add_argument("--max-steps", type=int, default=1000)
     parser.add_argument("--camera-interface", default="intel_realsense",
                         choices=["intel_realsense", "opencv"])
