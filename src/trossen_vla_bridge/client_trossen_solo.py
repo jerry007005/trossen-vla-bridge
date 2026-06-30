@@ -84,6 +84,7 @@ class TrossenSoloPolicyBridge:
         self.max_steps = max_steps
         self.send_wrist = send_wrist
         self.reset_to_home = reset_to_home
+        self.send_raw_images = send_raw_images
 
         log.info("Connecting to policy server %s:%d", server_host, server_port)
         self.policy = WebsocketClientPolicy(host=server_host, port=server_port)
@@ -154,15 +155,11 @@ class TrossenSoloPolicyBridge:
             )
         state = np.asarray(joint_vals[:ACTION_DIM], dtype=np.float32)
 
-        # 2. Images: lerobot returns HWC RGB float tensors. Send RAW 480x640
-        # CHW uint8 to the server -- do NOT pre-resize. OpenVLA / OFT's
-        # PrismaticImageProcessor uses `image_resize_strategy="letterbox"`,
-        # which pads to a square BEFORE resizing to 224x224. A cv2 stretch
-        # to 224x224 here would silently break that contract -- object
-        # proportions get squashed horizontally, the model goes OOD and
-        # falls back to ~zero deltas (visible as a stalled arm). pi0 happens
-        # to be robust because openpi's image pipeline normalises whatever
-        # size it receives.
+        # 2. Images: lerobot returns HWC RGB. Send RAW 480x640 CHW to the
+        # server -- the OFT and openvla servers will cv2-resize to 224x224
+        # internally to match the tf.image.resize pixel-level behaviour their
+        # training data went through. The pi0 server keeps the raw frame as-is
+        # and lets openpi's image pipeline handle it.
         images: dict[str, np.ndarray] = {}
         wanted = ["cam_main"] + (["cam_wrist"] if self.send_wrist else [])
         for cam in wanted:

@@ -120,6 +120,15 @@ class OpenVLAPolicy(BasePolicy):
         if img_chw.ndim != 3 or img_chw.shape[0] != 3:
             raise ValueError(f"image must be uint8 CHW (3,H,W); got {img_chw.shape}")
         img_hwc = np.transpose(img_chw, (1, 2, 0)).astype(np.uint8)
+        # Pre-resize to 224x224 with cv2.INTER_LINEAR -- training ran every
+        # frame through OXE's tf.image.resize(224, 224) before the model saw
+        # it, and cv2.INTER_LINEAR is the inference-side resize that most
+        # closely matches tf.image.resize at the pixel level (letting
+        # PrismaticImageProcessor's TVF.resize do it instead empirically
+        # regressed L1 by ~28% on training-distribution frames).
+        if img_hwc.shape[:2] != (224, 224):
+            import cv2
+            img_hwc = cv2.resize(img_hwc, (224, 224), interpolation=cv2.INTER_LINEAR)
         image = Image.fromarray(img_hwc)
 
         prompt_text = obs.get("prompt") or "lift the eggplant"

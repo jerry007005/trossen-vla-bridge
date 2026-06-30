@@ -130,13 +130,26 @@ class OpenVLAOFTPolicy(BasePolicy):
                 f"got {list(imgs.keys())}"
             )
 
-        def chw_to_hwc(x: np.ndarray) -> np.ndarray:
+        def chw_to_hwc224(x: np.ndarray) -> np.ndarray:
+            """CHW uint8 (any HxW) -> HWC uint8 224x224 via cv2.INTER_LINEAR.
+
+            Training ran every frame through OXE's tf.image.resize(224, 224)
+            before the model saw it (see prismatic/vla/datasets/rlds/
+            obs_transforms.decode_and_resize). cv2.INTER_LINEAR is the
+            inference-side resize whose pixel-level output most closely
+            tracks tf.image.resize -- letting the PrismaticImageProcessor
+            fall back to torchvision's TVF.resize empirically regressed L1.
+            """
+            import cv2  # cheap; only imported when this code path runs
             arr = np.asarray(x)
             if arr.ndim != 3 or arr.shape[0] != 3:
                 raise ValueError(
                     f"image must be uint8 CHW (3,H,W); got shape {arr.shape}"
                 )
-            return np.transpose(arr, (1, 2, 0)).astype(np.uint8)
+            hwc = np.transpose(arr, (1, 2, 0)).astype(np.uint8)
+            if hwc.shape[:2] != (224, 224):
+                hwc = cv2.resize(hwc, (224, 224), interpolation=cv2.INTER_LINEAR)
+            return hwc
 
         # get_vla_action consumes:
         #   oft_obs["full_image"]  HWC uint8 primary camera
@@ -150,8 +163,8 @@ class OpenVLAOFTPolicy(BasePolicy):
         if state_raw.shape[0] < ACTION_DIM:
             raise ValueError(f"state must have >= {ACTION_DIM} dims; got {state_raw.shape}")
         oft_obs = {
-            "full_image": chw_to_hwc(imgs[self.primary_image_key]),
-            "wrist_image": chw_to_hwc(imgs[self.wrist_image_key]),
+            "full_image": chw_to_hwc224(imgs[self.primary_image_key]),
+            "wrist_image": chw_to_hwc224(imgs[self.wrist_image_key]),
             "state": state_raw,
         }
         task = obs.get("prompt") or "lift the eggplant"
