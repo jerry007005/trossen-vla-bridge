@@ -84,7 +84,6 @@ class TrossenSoloPolicyBridge:
         self.max_steps = max_steps
         self.send_wrist = send_wrist
         self.reset_to_home = reset_to_home
-        self.send_raw_images = send_raw_images
 
         log.info("Connecting to policy server %s:%d", server_host, server_port)
         self.policy = WebsocketClientPolicy(host=server_host, port=server_port)

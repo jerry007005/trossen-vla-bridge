@@ -87,10 +87,7 @@ class OpenVLAOFTPolicy(BasePolicy):
             use_diffusion=False,
             use_film=False,
             num_images_in_input=2,
-            use_proprio=True,  # 6-task ckpt was TRAINED with use_proprio=True;
-                               # leaving this False silently disabled proprio at
-                               # inference and the model's L1 head fell back to
-                               # near-mean actions (visible as a stalled arm).
+            use_proprio=True,
             load_in_8bit=False,
             load_in_4bit=False,
             center_crop=True,
@@ -130,41 +127,30 @@ class OpenVLAOFTPolicy(BasePolicy):
                 f"got {list(imgs.keys())}"
             )
 
-        def chw_to_hwc224(x: np.ndarray) -> np.ndarray:
-            """CHW uint8 (any HxW) -> HWC uint8 224x224 via cv2.INTER_LINEAR.
+        def chw_to_hwc(x: np.ndarray) -> np.ndarray:
+            """CHW uint8 (any HxW) -> HWC uint8 (any HxW).
 
-            Training ran every frame through OXE's tf.image.resize(224, 224)
-            before the model saw it (see prismatic/vla/datasets/rlds/
-            obs_transforms.decode_and_resize). cv2.INTER_LINEAR is the
-            inference-side resize whose pixel-level output most closely
-            tracks tf.image.resize -- letting the PrismaticImageProcessor
-            fall back to torchvision's TVF.resize empirically regressed L1.
+            The PrismaticImageProcessor (via TVF.resize) handles resizing to
+            (224, 224) internally -- this matches training, where the new
+            *_png datasets disable OXE's tf.image.resize so the model's own
+            processor is the only resize step in the pipeline.
             """
-            import cv2  # cheap; only imported when this code path runs
             arr = np.asarray(x)
             if arr.ndim != 3 or arr.shape[0] != 3:
                 raise ValueError(
                     f"image must be uint8 CHW (3,H,W); got shape {arr.shape}"
                 )
-            hwc = np.transpose(arr, (1, 2, 0)).astype(np.uint8)
-            if hwc.shape[:2] != (224, 224):
-                hwc = cv2.resize(hwc, (224, 224), interpolation=cv2.INTER_LINEAR)
-            return hwc
+            return np.transpose(arr, (1, 2, 0)).astype(np.uint8)
 
-        # get_vla_action consumes:
-        #   oft_obs["full_image"]  HWC uint8 primary camera
-        #   oft_obs["wrist_image"] HWC uint8 wrist camera
-        #   oft_obs["state"]       7-D proprio (raw radian state); normalised
-        #                          inside get_vla_action via norm_stats[unnorm_key]["proprio"]
         state_raw = obs.get("state")
         if state_raw is None:
-            raise KeyError("obs['state'] is required (model is delta-trained + uses proprio)")
+            raise KeyError("obs['state'] is required (proprio projector input)")
         state_raw = np.asarray(state_raw, dtype=np.float32)
         if state_raw.shape[0] < ACTION_DIM:
             raise ValueError(f"state must have >= {ACTION_DIM} dims; got {state_raw.shape}")
         oft_obs = {
-            "full_image": chw_to_hwc224(imgs[self.primary_image_key]),
-            "wrist_image": chw_to_hwc224(imgs[self.wrist_image_key]),
+            "full_image": chw_to_hwc(imgs[self.primary_image_key]),
+            "wrist_image": chw_to_hwc(imgs[self.wrist_image_key]),
             "state": state_raw,
         }
         task = obs.get("prompt") or "lift the eggplant"
@@ -177,19 +163,11 @@ class OpenVLAOFTPolicy(BasePolicy):
             action_head=self.action_head,
             proprio_projector=self.proprio_projector,
         )
-        # `actions` is a list of NUM_ACTIONS_CHUNK numpy arrays, each (ACTION_DIM,)
+        # `actions` is a list of NUM_ACTIONS_CHUNK numpy arrays, each (ACTION_DIM,).
+        # The model is trained ALOHA-style on absolute joint targets (no per-step
+        # delta), so we DO NOT add state back -- whatever the model returns is
+        # already the absolute Goal_Position the robot should reach.
         actions = np.stack(actions, axis=0).astype(np.float32)
-
-        # Add state back to every step's arm dims to reconstruct absolute joint
-        # targets. forge_dataset_transform subtracted state from action[:, :6]
-        # during training, so the model output here is a per-step arm delta.
-        state = obs.get("state")
-        if state is None:
-            raise KeyError("obs['state'] is required (model is delta-trained)")
-        state = np.asarray(state, dtype=np.float32)
-        if state.shape[0] < 6:
-            raise ValueError(f"state must have >=6 dims; got {state.shape}")
-        actions[:, :6] = actions[:, :6] + state[None, :6]
 
         return {"actions": actions}
 
@@ -198,12 +176,12 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--checkpoint",
-        default="UoA-Trossen-Arm/openvla-7b-oft-trossen-6task",
+        default="UoA-Trossen-Arm/openvla-7b-oft-trossen-6task-png",
         help="HF repo id or local checkpoint dir",
     )
     parser.add_argument("--primary-image-key", default="cam_main")
     parser.add_argument("--wrist-image-key", default="cam_wrist")
-    parser.add_argument("--unnorm-key", default="trossen_6task_combined")
+    parser.add_argument("--unnorm-key", default="trossen_6task_combined_png")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()

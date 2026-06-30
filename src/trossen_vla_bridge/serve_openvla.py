@@ -120,15 +120,9 @@ class OpenVLAPolicy(BasePolicy):
         if img_chw.ndim != 3 or img_chw.shape[0] != 3:
             raise ValueError(f"image must be uint8 CHW (3,H,W); got {img_chw.shape}")
         img_hwc = np.transpose(img_chw, (1, 2, 0)).astype(np.uint8)
-        # Pre-resize to 224x224 with cv2.INTER_LINEAR -- training ran every
-        # frame through OXE's tf.image.resize(224, 224) before the model saw
-        # it, and cv2.INTER_LINEAR is the inference-side resize that most
-        # closely matches tf.image.resize at the pixel level (letting
-        # PrismaticImageProcessor's TVF.resize do it instead empirically
-        # regressed L1 by ~28% on training-distribution frames).
-        if img_hwc.shape[:2] != (224, 224):
-            import cv2
-            img_hwc = cv2.resize(img_hwc, (224, 224), interpolation=cv2.INTER_LINEAR)
+        # The PrismaticImageProcessor (TVF.resize) handles resizing to 224x224
+        # internally -- matches training, where the new *_png datasets disable
+        # OXE's tf.image.resize so the processor is the only resize step.
         image = Image.fromarray(img_hwc)
 
         prompt_text = obs.get("prompt") or "lift the eggplant"
@@ -139,19 +133,9 @@ class OpenVLAPolicy(BasePolicy):
         )
         action = np.asarray(action, dtype=np.float32)  # (7,)
 
-        # Add state back to the arm dims to reconstruct an absolute joint target.
-        # The forge_dataset_transform subtracts state from action[:, :6] during
-        # training, so the model output here is a per-step delta for arm joints
-        # (gripper dim 6 stays absolute). pi0 does the equivalent internally via
-        # its AbsoluteActions output transform.
-        state = obs.get("state")
-        if state is None:
-            raise KeyError("obs['state'] is required (model is delta-trained)")
-        state = np.asarray(state, dtype=np.float32)
-        if state.shape[0] < 6:
-            raise ValueError(f"state must have >=6 dims; got {state.shape}")
-        action[:6] = action[:6] + state[:6]
-
+        # Model is trained ALOHA-style on absolute joint targets (no delta), so
+        # we DO NOT add state back -- the prediction is already the absolute
+        # Goal_Position the robot should reach.
         return {"actions": action.reshape(1, -1)}  # chunk size = 1
 
 
@@ -159,11 +143,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--checkpoint",
-        default="UoA-Trossen-Arm/openvla-7b-trossen-6task",
+        default="UoA-Trossen-Arm/openvla-7b-trossen-6task-png",
         help="HF repo id or local checkpoint dir",
     )
     parser.add_argument("--image-key", default="cam_main")
-    parser.add_argument("--unnorm-key", default="trossen_6task_combined")
+    parser.add_argument("--unnorm-key", default="trossen_6task_combined_png")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--device", default="cuda")

@@ -45,11 +45,16 @@ mid-trajectory long before reaching the object.
 | `serve_oft.py` | 20 | cam_main + cam_wrist | ~95 ms / query |
 | `serve_pi0.py` | 50 | cam_main + cam_wrist | ~48 ms / query |
 
-The default HF checkpoints (private) are the **6-task** finetunes:
+The default HF checkpoints (private) are the **6-task `_png` (ALOHA-style)**
+finetunes:
 
-- `UoA-Trossen-Arm/pi0-trossen-6task` — pi0 PyTorch port (step 39k)
-- `UoA-Trossen-Arm/openvla-7b-oft-trossen-6task` — OpenVLA-OFT, merged base + L1 action head + proprio projector (step 195k)
-- `UoA-Trossen-Arm/openvla-7b-trossen-6task` — vanilla OpenVLA-7B, LoRA-merged (step ~170k)
+- `UoA-Trossen-Arm/pi0-trossen-6task` — pi0 PyTorch port (delta-action; unchanged)
+- `UoA-Trossen-Arm/openvla-7b-oft-trossen-6task-png` — OpenVLA-OFT trained ALOHA-style on absolute joint targets (`trossen_6task_combined_png` dataset)
+- `UoA-Trossen-Arm/openvla-7b-trossen-6task-png` — vanilla OpenVLA-7B, same ALOHA-style training
+
+The legacy delta-action `openvla-7b-oft-trossen-6task` and `openvla-7b-trossen-6task`
+checkpoints are no longer used; the current bridge code path predicts absolute
+joint targets directly (no state add-back) and would be inconsistent with them.
 
 The 6-task models were trained on these instruction strings — pick whichever
 one matches your current scene at inference time:
@@ -198,44 +203,33 @@ trossen-client --connect-only \
 autonomous policy execution). `--camera-interface opencv` switches off
 RealSense and uses /dev/video* indices instead.
 
-## Action representation: delta arm joints + absolute gripper
+## Action representation: ALOHA-style absolute joint targets (OpenVLA / OFT) + pi0 delta
 
-All three servers in this repo assume the checkpoint was trained on **per-step
-deltas for the arm joints** and **absolute values for the gripper**, the way
-pi0 always was and the way OpenVLA / OFT now also are.
+**pi0** is delta-trained: the model predicts a per-step arm delta (relative to
+the chunk-start state) and openpi's `AbsoluteActions` output transform adds the
+robot's current state back inside the policy. `serve_pi0.py` simply forwards
+the resulting absolute joint targets to the client.
 
-The transform lives in `patches/openvla.patch` and `patches/openvla_oft.patch`,
-inside `forge_dataset_transform`:
+**OpenVLA-OFT and vanilla OpenVLA** are now trained ALOHA-style on the
+`trossen_6task_combined_png` dataset:
 
-```python
-# Per-step pre-transform: arm joints become deltas, gripper stays absolute.
-arm_delta = action[:, :6] - state[:, :6]
-gripper   = action[:, 6:7]
-trajectory["action"] = tf.concat([arm_delta, gripper], axis=-1)
-```
+- Our transform is a no-op (`return trajectory`); the RLDS action column is
+  already absolute joint targets.
+- `action_encoding = JOINT_POS` marks all 7 dims as absolute and normalises
+  them all with BOUNDS_Q99.
+- `dataset_statistics.json` therefore reflects the absolute joint distribution
+  (q01..q99 spans the full reachable range of each joint).
 
-`dataset_statistics.json` is recomputed from this delta-transformed data, so
-the per-dim normalisation is on a sane ±0.05 rad/step range, not on the wide
-absolute joint range. The model learns small relative motions that don't
-depend on the data-collection arm's motor-zero calibration.
+At inference the model directly outputs the absolute Goal_Position; the server
+forwards it unchanged. **No state add-back, no per-step delta math.** This is
+exactly how ALOHA's bimanual OFT setup behaves and removes the chunk add-back
+error that the old delta convention introduced when re-using a chunk across
+multiple control steps.
 
-At inference the server adds the robot's current state back to the arm dims:
-
-```
-absolute_target[:6] = model_output[:6] + obs["state"][:6]
-absolute_target[6]  = model_output[6]                     # gripper stays absolute
-```
-
-This is identical in spirit to pi0's `AbsoluteActions` output transform; the
-client just sees an absolute joint target like before and sends it to lerobot.
-There is no flag — every server in this repo does this unconditionally because
-every checkpoint is trained this way.
-
-> **Note on the original `UoA-Trossen-Arm/openvla-7b{,-oft}-lift-eggplant`
-> checkpoints**: those were trained on absolute joints. They no longer match
-> the inference path here and should be retrained with the patched
-> `forge_dataset_transform`. Use a fresh `--run_id_note delta` so the training
-> script doesn't reuse stale absolute-action `dataset_statistics.json`.
+> **Migration note**: the original delta-trained checkpoints
+> `openvla-7b-oft-trossen-6task` and `openvla-7b-trossen-6task` are
+> incompatible with the current server code (they predict deltas, the server
+> no longer adds state back). Use the `_png` checkpoints instead.
 
 ## Safety
 
