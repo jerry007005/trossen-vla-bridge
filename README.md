@@ -45,12 +45,18 @@ mid-trajectory long before reaching the object.
 | `serve_oft.py` | 20 | cam_main + cam_wrist | ~95 ms / query |
 | `serve_pi0.py` | 50 | cam_main + cam_wrist | ~48 ms / query |
 
-The default HF checkpoints (private) are the **6-task `_png` (ALOHA-style)**
-finetunes:
+Available HF checkpoints (private, ALOHA-style absolute joint targets throughout):
 
-- `UoA-Trossen-Arm/pi0-trossen-6task` — pi0 PyTorch port (delta-action; unchanged)
-- `UoA-Trossen-Arm/openvla-7b-oft-trossen-6task-png` — OpenVLA-OFT trained ALOHA-style on absolute joint targets (`trossen_6task_combined_png` dataset)
-- `UoA-Trossen-Arm/openvla-7b-trossen-6task-png` — vanilla OpenVLA-7B, same ALOHA-style training
+| Server | Default checkpoint | Notes |
+|---|---|---|
+| `serve_pi0.py` | `UoA-Trossen-Arm/pi0-trossen-6task` | pi0 PyTorch port (delta-action; unchanged) |
+| `serve_oft.py` | **`UoA-Trossen-Arm/openvla-7b-oft-diverse-pnp-png`** | OFT L1 head, single-task starfruit→pot, `image_aug=True` |
+| `serve_openvla.py` | `UoA-Trossen-Arm/openvla-7b-trossen-6task-png` | vanilla OpenVLA-7B, 6-task |
+
+Additional OFT checkpoints (pass via `--checkpoint`, `--unnorm-key`):
+
+- `UoA-Trossen-Arm/openvla-7b-oft-trossen-6task-png` — OFT L1 head on 6-task combined data; use `--unnorm-key trossen_6task_combined_png`
+- `UoA-Trossen-Arm/openvla-7b-oft-trossen-6task-png-diffusion` — OFT **DDIM diffusion** head on 6-task combined; `serve_oft.py` auto-detects "diffusion" in the checkpoint name and enables `use_diffusion=True` (also loads the required `noisy_action_projector`). Force explicitly with `--use-diffusion` / `--no-use-diffusion`.
 
 The legacy delta-action `openvla-7b-oft-trossen-6task` and `openvla-7b-trossen-6task`
 checkpoints are no longer used; the current bridge code path predicts absolute

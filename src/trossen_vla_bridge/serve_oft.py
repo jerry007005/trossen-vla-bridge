@@ -1,12 +1,23 @@
 """openpi-client compatible websocket server wrapping OpenVLA-OFT.
 
 OFT predicts a chunk of NUM_ACTIONS_CHUNK (=20 for Trossen) 7-DoF actions per
-forward pass through the LoRA-merged base + a separate L1 regression head.
+forward pass through the LoRA-merged base + either an L1 regression head or a
+DDIM diffusion action head.
 
 Run (use openvla-oft's venv on a CUDA box):
+
+    # Default: diverse-pick-and-place L1 head
+    python serve_oft.py --port 8000
+
+    # 6-task multi-task L1 head
     python serve_oft.py \
-        --checkpoint UoA-Trossen-Arm/openvla-7b-oft-trossen-6task \
-        --unnorm-key trossen_6task_combined --port 8000
+        --checkpoint UoA-Trossen-Arm/openvla-7b-oft-trossen-6task-png \
+        --unnorm-key trossen_6task_combined_png --port 8000
+
+    # 6-task diffusion head (auto-detected from checkpoint name)
+    python serve_oft.py \
+        --checkpoint UoA-Trossen-Arm/openvla-7b-oft-trossen-6task-png-diffusion \
+        --unnorm-key trossen_6task_combined_png --port 8000
 """
 from __future__ import annotations
 
@@ -50,6 +61,7 @@ class GenerateConfig:
 
 from experiments.robot.openvla_utils import (
     get_action_head,
+    get_noisy_action_projector,
     get_processor,
     get_proprio_projector,
     get_vla,
@@ -76,15 +88,17 @@ class OpenVLAOFTPolicy(BasePolicy):
     def __init__(
         self,
         checkpoint: str,
-        unnorm_key: str = "forge_dataset",
+        unnorm_key: str = "diverse_pnp_png",
         primary_image_key: str = "cam_main",
         wrist_image_key: str = "cam_wrist",
+        use_diffusion: bool = False,
     ) -> None:
         ckpt = _resolve_checkpoint(checkpoint)
+        self.use_diffusion = use_diffusion
         self.cfg = GenerateConfig(
             pretrained_checkpoint=ckpt,
-            use_l1_regression=True,
-            use_diffusion=False,
+            use_l1_regression=not use_diffusion,
+            use_diffusion=use_diffusion,
             use_film=False,
             num_images_in_input=2,
             use_proprio=True,
@@ -93,17 +107,26 @@ class OpenVLAOFTPolicy(BasePolicy):
             center_crop=True,
             unnorm_key=unnorm_key,
         )
-        log.info("Loading OFT VLA + L1 action head + proprio projector from %s", ckpt)
+        head_name = "diffusion" if use_diffusion else "L1"
+        log.info("Loading OFT VLA + %s action head + proprio projector from %s", head_name, ckpt)
         self.vla = get_vla(self.cfg)
         self.action_head = get_action_head(self.cfg, llm_dim=self.vla.llm_dim)
         self.proprio_projector = get_proprio_projector(
             self.cfg, llm_dim=self.vla.llm_dim, proprio_dim=ACTION_DIM
         )
+        # Diffusion head also needs the noisy-action projector at inference
+        # (it feeds noised action samples back into the LLM at each denoising step).
+        self.noisy_action_projector = (
+            get_noisy_action_projector(self.cfg, llm_dim=self.vla.llm_dim)
+            if use_diffusion
+            else None
+        )
         self.processor = get_processor(self.cfg)
         self.primary_image_key = primary_image_key
         self.wrist_image_key = wrist_image_key
         log.info(
-            "OFT ready: chunk=%d action_dim=%d primary=%s wrist=%s",
+            "OFT ready: head=%s chunk=%d action_dim=%d primary=%s wrist=%s",
+            head_name,
             NUM_ACTIONS_CHUNK,
             ACTION_DIM,
             primary_image_key,
@@ -162,6 +185,7 @@ class OpenVLAOFTPolicy(BasePolicy):
             task_label=task,
             action_head=self.action_head,
             proprio_projector=self.proprio_projector,
+            noisy_action_projector=self.noisy_action_projector,
         )
         # `actions` is a list of NUM_ACTIONS_CHUNK numpy arrays, each (ACTION_DIM,).
         # The model is trained ALOHA-style on absolute joint targets (no per-step
@@ -176,21 +200,34 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--checkpoint",
-        default="UoA-Trossen-Arm/openvla-7b-oft-trossen-6task-png",
+        default="UoA-Trossen-Arm/openvla-7b-oft-diverse-pnp-png",
         help="HF repo id or local checkpoint dir",
     )
     parser.add_argument("--primary-image-key", default="cam_main")
     parser.add_argument("--wrist-image-key", default="cam_wrist")
-    parser.add_argument("--unnorm-key", default="trossen_6task_combined_png")
+    parser.add_argument("--unnorm-key", default="diverse_pnp_png")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument(
+        "--use-diffusion",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use the DDIM diffusion action head. If unset, auto-detected from "
+             "checkpoint name (any '-diffusion' substring turns it on).",
+    )
     args = parser.parse_args()
+
+    if args.use_diffusion is None:
+        args.use_diffusion = "diffusion" in args.checkpoint.lower()
+        if args.use_diffusion:
+            log.info("Auto-detected diffusion head from checkpoint name")
 
     policy = OpenVLAOFTPolicy(
         checkpoint=args.checkpoint,
         unnorm_key=args.unnorm_key,
         primary_image_key=args.primary_image_key,
         wrist_image_key=args.wrist_image_key,
+        use_diffusion=args.use_diffusion,
     )
     server = WebsocketPolicyServer(
         policy=policy,
@@ -198,6 +235,7 @@ def main() -> None:
         port=args.port,
         metadata={
             "vla": "openvla-7b-oft",
+            "head": "diffusion" if args.use_diffusion else "l1",
             "action_dim": int(ACTION_DIM),
             "chunk_size": int(NUM_ACTIONS_CHUNK),
             "expected_image_keys": [args.primary_image_key, args.wrist_image_key],
