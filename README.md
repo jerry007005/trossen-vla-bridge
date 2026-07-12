@@ -49,14 +49,19 @@ Available HF checkpoints (private, ALOHA-style absolute joint targets throughout
 
 | Server | Default checkpoint | Notes |
 |---|---|---|
-| `serve_pi0.py` | `UoA-Trossen-Arm/pi0-trossen-6task` | pi0 PyTorch port (delta-action; unchanged) |
-| `serve_oft.py` | **`UoA-Trossen-Arm/openvla-7b-oft-diverse-pnp-png`** | OFT L1 head, single-task starfruit→pot, `image_aug=True` |
-| `serve_openvla.py` | `UoA-Trossen-Arm/openvla-7b-trossen-6task-png` | vanilla OpenVLA-7B, 6-task |
+| `serve_pi0.py` | **`UoA-Trossen-Arm/pi0-trossen-pnp-4diverse`** | pi0 PyTorch port, 4-object pick-and-place (delta-action) |
+| `serve_oft.py` | **`UoA-Trossen-Arm/openvla-7b-oft-pnp-4diverse-png`** | OFT L1 head, 4-object pick-and-place, `image_aug=True` |
+| `serve_openvla.py` | `UoA-Trossen-Arm/openvla-7b-trossen-6task-png` | vanilla OpenVLA-7B, 6-task (pnp-4diverse variant in training) |
 
 Additional OFT checkpoints (pass via `--checkpoint`, `--unnorm-key`):
 
+- `UoA-Trossen-Arm/openvla-7b-oft-diverse-pnp-png` — OFT L1 head on single-task starfruit→pot; use `--unnorm-key diverse_pnp_png`
 - `UoA-Trossen-Arm/openvla-7b-oft-trossen-6task-png` — OFT L1 head on 6-task combined data; use `--unnorm-key trossen_6task_combined_png`
 - `UoA-Trossen-Arm/openvla-7b-oft-trossen-6task-png-diffusion` — OFT **DDIM diffusion** head on 6-task combined; `serve_oft.py` auto-detects "diffusion" in the checkpoint name and enables `use_diffusion=True` (also loads the required `noisy_action_projector`). Force explicitly with `--use-diffusion` / `--no-use-diffusion`.
+
+Additional pi0 checkpoint (pass via `--checkpoint`, `--config-name`):
+
+- `UoA-Trossen-Arm/pi0-trossen-6task` — pi0 on the 6-task combined data; use `--config-name pi0_trossen_6task_low_mem_finetune`
 
 The legacy delta-action `openvla-7b-oft-trossen-6task` and `openvla-7b-trossen-6task`
 checkpoints are no longer used; the current bridge code path predicts absolute

@@ -114,8 +114,8 @@ class Pi0Policy(BasePolicy):
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--checkpoint", default="UoA-Trossen-Arm/pi0-trossen-6task")
-    p.add_argument("--config-name", default="pi0_trossen_6task_low_mem_finetune")
+    p.add_argument("--checkpoint", default="UoA-Trossen-Arm/pi0-trossen-pnp-4diverse")
+    p.add_argument("--config-name", default="pi0_trossen_pnp_4diverse_low_mem_finetune")
     p.add_argument("--primary-image-key", default="cam_main")
     p.add_argument("--wrist-image-key", default="cam_wrist")
     p.add_argument("--host", default="0.0.0.0")
