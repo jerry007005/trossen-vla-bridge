@@ -143,11 +143,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--checkpoint",
-        default="UoA-Trossen-Arm/openvla-7b-trossen-6task-png",
+        default="UoA-Trossen-Arm/openvla-7b-trossen-pnp-4diverse-png",
         help="HF repo id or local checkpoint dir",
     )
     parser.add_argument("--image-key", default="cam_main")
-    parser.add_argument("--unnorm-key", default="trossen_6task_combined_png")
+    parser.add_argument("--unnorm-key", default="pnp_4diverse_png")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--device", default="cuda")

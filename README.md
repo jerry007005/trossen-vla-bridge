@@ -51,7 +51,7 @@ Available HF checkpoints (private, ALOHA-style absolute joint targets throughout
 |---|---|---|
 | `serve_pi0.py` | **`UoA-Trossen-Arm/pi0-trossen-pnp-4diverse`** | pi0 PyTorch port, 4-object pick-and-place (delta-action) |
 | `serve_oft.py` | **`UoA-Trossen-Arm/openvla-7b-oft-pnp-4diverse-png`** | OFT L1 head, 4-object pick-and-place, `image_aug=True` |
-| `serve_openvla.py` | `UoA-Trossen-Arm/openvla-7b-trossen-6task-png` | vanilla OpenVLA-7B, 6-task (pnp-4diverse variant in training) |
+| `serve_openvla.py` | **`UoA-Trossen-Arm/openvla-7b-trossen-pnp-4diverse-png`** | vanilla OpenVLA-7B, 4-object pick-and-place |
 
 Additional OFT checkpoints (pass via `--checkpoint`, `--unnorm-key`):
 
