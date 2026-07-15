@@ -19,6 +19,12 @@ Run (in /node-shared/jerry007005/haochuan/lerobot/.venv):
     # Real motion (DO NOT RUN until the model is verified safe):
     python client_trossen_solo.py --mode autonomous \
         --task-prompt "lift the pineapple"
+
+    # EEF-delta mode for the new Bridge-V2-style ckpt
+    # (openvla-7b-trossen-pnp-4diverse-eef-png). state is [xyz, rpy, gripper];
+    # action[:6] is EE delta (clipped to +/- 0.01), action[6] > 0.5 -> open.
+    python client_trossen_solo.py --mode autonomous \
+        --action-mode eef_delta --task-prompt "..."
 """
 from __future__ import annotations
 
@@ -74,9 +80,13 @@ class TrossenSoloPolicyBridge:
         cam_main_serial: str | None = None,
         cam_wrist_serial: str | None = None,
         reset_to_home: bool = False,
+        action_mode: str = "joint_abs",
+        eef_goal_time: float = 0.1,
     ) -> None:
         if mode not in {"autonomous", "test"}:
             raise ValueError(f"mode must be 'autonomous' or 'test'; got {mode!r}")
+        if action_mode not in {"joint_abs", "eef_delta"}:
+            raise ValueError(f"action_mode must be 'joint_abs' or 'eef_delta'; got {action_mode!r}")
         self.mode = mode
         self.control_frequency = control_frequency
         self.dt = 1.0 / control_frequency
@@ -84,6 +94,11 @@ class TrossenSoloPolicyBridge:
         self.max_steps = max_steps
         self.send_wrist = send_wrist
         self.reset_to_home = reset_to_home
+        self.action_mode = action_mode
+        self.eef_goal_time = eef_goal_time
+        # Track last gripper open/close so we don't re-issue the same
+        # blocking(=False) gripper command every 50ms in eef_delta mode.
+        self._last_gripper_open: bool | None = None
 
         log.info("Connecting to policy server %s:%d", server_host, server_port)
         self.policy = WebsocketClientPolicy(host=server_host, port=server_port)
@@ -152,7 +167,21 @@ class TrossenSoloPolicyBridge:
                 f"Expected at least {ACTION_DIM} joint positions, got {len(joint_vals)} "
                 f"from keys {joint_keys}"
             )
-        state = np.asarray(joint_vals[:ACTION_DIM], dtype=np.float32)
+        joint_state = np.asarray(joint_vals[:ACTION_DIM], dtype=np.float32)
+
+        # Choose which state to advertise to the server based on action_mode:
+        #  joint_abs -> 7 raw joint positions (backward compatible)
+        #  eef_delta -> [xyz(3), rpy(3), gripper_joint(1)] built via raw driver
+        #               (matches training-time state_obs_keys=[EEF_state, gripper_state]).
+        if self.action_mode == "eef_delta":
+            from scipy.spatial.transform import Rotation as _R
+            raw = self._raw_driver()
+            pos = np.asarray(raw.get_cartesian_positions(), dtype=np.float32)  # [xyz, rotvec]
+            xyz = pos[:3]
+            rpy = _R.from_rotvec(pos[3:]).as_euler("xyz")
+            state = np.concatenate([xyz, rpy, joint_state[6:7]]).astype(np.float32)
+        else:
+            state = joint_state
 
         # 2. Images: lerobot returns HWC RGB. Send RAW 480x640 CHW to the
         # server -- the OFT and openvla servers will cv2-resize to 224x224
@@ -188,17 +217,77 @@ class TrossenSoloPolicyBridge:
 
     # ------------------------------------------------------------------ act
 
+    def _raw_driver(self):
+        """Return the underlying trossen_arm.TrossenArmDriver used by lerobot.
+
+        Only reachable after `self.robot.connect()`; needed for EEF-delta mode
+        because lerobot's public `send_action(tensor)` API is joint-space only.
+        """
+        try:
+            return self.robot.follower_arms["main"].driver
+        except (AttributeError, KeyError) as exc:
+            raise RuntimeError(
+                "Could not reach raw trossen_arm driver via lerobot -- "
+                "EEF-delta mode requires the standard TrossenAISoloRobotConfig "
+                "with a follower arm named 'main'."
+            ) from exc
+
     def _send_action(self, action: np.ndarray) -> None:
         if action.shape != (ACTION_DIM,):
             raise ValueError(f"action shape must be ({ACTION_DIM},); got {action.shape}")
         if self.mode == "test":
             log.debug("test-mode action (not sent): %s", np.round(action, 4))
             return
+
+        if self.action_mode == "eef_delta":
+            self._send_action_eef_delta(action)
+            return
+
+        # joint_abs mode (default, backward compatible)
         # The follower arm expects an action under the key
         # `action.{joint_name}` per joint; lerobot 0.1.0's ManipulatorRobot
         # consumes a torch.tensor of shape (ACTION_DIM,).
         import torch
         self.robot.send_action(torch.from_numpy(action.astype(np.float32)))
+
+    def _send_action_eef_delta(self, action: np.ndarray) -> None:
+        """EEF-delta action: action[:6] are per-step delta (dx dy dz drx dry drz)
+        added to the current EE pose; action[6] > 0.5 -> open, else close.
+
+        Mirrors sample.py::WidowXAIInterface.step_action:
+          - clip arm delta to +/- 0.01 to bound each step
+          - convert rpy target back to rotvec for set_cartesian_positions
+          - use non-blocking calls (own loop paces at self.dt)
+        """
+        from scipy.spatial.transform import Rotation as _R
+        from trossen_arm import ArrayDouble6, InterpolationSpace
+
+        raw = self._raw_driver()
+        cur = np.asarray(raw.get_cartesian_positions(), dtype=np.float32)  # [xyz, rotvec]
+        cur_rpy = _R.from_rotvec(cur[3:]).as_euler("xyz")
+
+        arm_delta = np.clip(action[:6].astype(np.float32), -0.01, 0.01)
+        goal_xyz = cur[:3] + arm_delta[:3]
+        goal_rpy = cur_rpy + arm_delta[3:]
+        goal_rotvec = _R.from_euler("xyz", goal_rpy).as_rotvec()
+        goal6 = np.concatenate([goal_xyz, goal_rotvec]).astype(np.float64)
+
+        raw.set_cartesian_positions(
+            ArrayDouble6(goal6),
+            interpolation_space=InterpolationSpace.joint,
+            goal_time=self.eef_goal_time,
+            blocking=False,
+        )
+
+        want_open = bool(action[6] > 0.5)
+        if self._last_gripper_open is not want_open:
+            # sample.py convention: +0.04 open, -0.04 close.
+            raw.set_gripper_position(
+                0.04 if want_open else -0.04,
+                goal_time=1.0,
+                blocking=False,
+            )
+            self._last_gripper_open = want_open
 
     # ------------------------------------------------------------- run loop
 
@@ -354,8 +443,31 @@ def main() -> None:
                              "the current pose to the trained home pose "
                              "(j1=pi/3, j2=pi/6, j3=0.6284, rest=0, gripper open) over "
                              "3 seconds. Off by default -- enable when starting a fresh "
-                             "episode and the arm is far from the training home pose.")
+                             "episode and the arm is far from the training home pose. "
+                             "Ignored in --action-mode eef_delta (joint-space reset "
+                             "doesn't apply once the policy speaks EE deltas).")
+    parser.add_argument("--action-mode", choices=["joint_abs", "eef_delta"],
+                        default="joint_abs",
+                        help="Semantic of what obs['state'] is and what action[t] means. "
+                             "'joint_abs' (default, backward compatible): state = 7 raw "
+                             "joint positions, action = 7 absolute joint targets sent via "
+                             "lerobot's send_action. 'eef_delta' (Bridge-V2 / new EEF "
+                             "openvla ckpt): state = [xyz(3), rpy(3), joint_gripper(1)] "
+                             "built via raw trossen_arm.get_cartesian_positions(); "
+                             "action = [dx, dy, dz, drx, dry, drz, gripper] with arm "
+                             "dims added to the current EE pose (clipped to +/- 0.01) "
+                             "and dispatched via set_cartesian_positions; gripper > 0.5 "
+                             "opens (+0.04), else closes (-0.04).")
+    parser.add_argument("--eef-goal-time", type=float, default=0.1,
+                        help="goal_time (seconds) passed to set_cartesian_positions in "
+                             "eef_delta mode. Longer smooths the trajectory but tolerates "
+                             "less new-command overshoot. Only used when --action-mode "
+                             "eef_delta.")
     args = parser.parse_args()
+
+    if args.action_mode == "eef_delta" and args.reset_to_home:
+        log.warning("--reset-to-home is a joint-space maneuver; ignoring in eef_delta mode")
+        args.reset_to_home = False
 
     if args.connect_only:
         # Minimal hardware sanity: build robot config + connect + dump one obs,
@@ -402,6 +514,8 @@ def main() -> None:
         cam_main_serial=args.cam_main_serial,
         cam_wrist_serial=args.cam_wrist_serial,
         reset_to_home=args.reset_to_home,
+        action_mode=args.action_mode,
+        eef_goal_time=args.eef_goal_time,
     )
     try:
         prompt = args.task_prompt if args.task_prompt is not None else _pick_task_prompt_interactively()
