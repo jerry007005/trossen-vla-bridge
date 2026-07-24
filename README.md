@@ -41,7 +41,7 @@ mid-trajectory long before reaching the object.
 
 | Server | chunk_size | input cameras | typical RTT (H200 NVL, after warm-up) |
 | --- | --- | --- | --- |
-| `serve_openvla.py` | 1 | cam_main only | ~190 ms / query |
+| `serve_openvla.py` | 1 | cam_wrist only (default; can be swapped via `--image-key`) | ~190 ms / query |
 | `serve_oft.py` | 20 | cam_main + cam_wrist | ~95 ms / query |
 | `serve_pi0.py` | 50 | cam_main + cam_wrist | ~48 ms / query |
 
@@ -51,7 +51,7 @@ Available HF checkpoints (private, ALOHA-style absolute joint targets throughout
 |---|---|---|
 | `serve_pi0.py` | **`UoA-Trossen-Arm/pi0-trossen-pnp-4diverse`** | pi0 PyTorch port, 4-object pick-and-place (delta-action) |
 | `serve_oft.py` | **`UoA-Trossen-Arm/openvla-7b-oft-pnp-4diverse-png`** | OFT L1 head, 4-object pick-and-place, `image_aug=True` |
-| `serve_openvla.py` | **`UoA-Trossen-Arm/openvla-7b-trossen-pnp-4diverse-png`** | vanilla OpenVLA-7B, 4-object pick-and-place |
+| `serve_openvla.py` | **`UoA-Trossen-Arm/openvla-7b-trossen-pnp-4diverse-wrist-png`** | vanilla OpenVLA-7B, wrist camera, 4-object pick-and-place |
 
 Additional OFT checkpoints (pass via `--checkpoint`, `--unnorm-key`):
 
@@ -62,6 +62,11 @@ Additional OFT checkpoints (pass via `--checkpoint`, `--unnorm-key`):
 Additional pi0 checkpoint (pass via `--checkpoint`, `--config-name`):
 
 - `UoA-Trossen-Arm/pi0-trossen-6task` — pi0 on the 6-task combined data; use `--config-name pi0_trossen_6task_low_mem_finetune`
+
+Additional vanilla-OpenVLA checkpoints (pass via `--checkpoint`, `--image-key`, `--unnorm-key`):
+
+- `UoA-Trossen-Arm/openvla-7b-trossen-pnp-4diverse-png` — same 4-object dataset but trained on the **main camera** (\`--image-key cam_main --unnorm-key pnp_4diverse_png\`)
+- `UoA-Trossen-Arm/openvla-7b-trossen-pnp-4diverse-eef-png` — main-camera + **Bridge-V2-style EEF-delta action** (\`--image-key cam_main --unnorm-key pnp_4diverse_eef_png\`); requires the client's `--action-mode eef_delta`
 
 The legacy delta-action `openvla-7b-oft-trossen-6task` and `openvla-7b-trossen-6task`
 checkpoints are no longer used; the current bridge code path predicts absolute
