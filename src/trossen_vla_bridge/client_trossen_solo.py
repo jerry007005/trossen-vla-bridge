@@ -30,8 +30,12 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+import shutil
+import subprocess
 import time
 from collections import defaultdict
+from datetime import datetime
 from typing import Dict, List
 
 import cv2
@@ -82,6 +86,10 @@ class TrossenSoloPolicyBridge:
         reset_to_home: bool = False,
         action_mode: str = "joint_abs",
         eef_goal_time: float = 0.1,
+        record_dir: str | None = None,
+        max_relative_target: float | list[float] | None = 0.3,
+        black_wrist: bool = False,
+        black_primary: bool = False,
     ) -> None:
         if mode not in {"autonomous", "test"}:
             raise ValueError(f"mode must be 'autonomous' or 'test'; got {mode!r}")
@@ -93,12 +101,41 @@ class TrossenSoloPolicyBridge:
         self.rate_of_inference = rate_of_inference
         self.max_steps = max_steps
         self.send_wrist = send_wrist
+        # When True, still advertise cam_wrist to the server but feed an all-zeros
+        # (pure black) frame instead of the real wrist view -- lets you mask the
+        # wrist input for a 2-camera checkpoint without dropping the key entirely.
+        self.black_wrist = black_wrist
+        # Same idea for the primary view: send cam_main as an all-zeros frame
+        # (the real frame is still read to size the black image).
+        self.black_primary = black_primary
         self.reset_to_home = reset_to_home
         self.action_mode = action_mode
         self.eef_goal_time = eef_goal_time
         # Track last gripper open/close so we don't re-issue the same
         # blocking(=False) gripper command every 50ms in eef_delta mode.
         self._last_gripper_open: bool | None = None
+
+        # Per-step safety clamp on joint motion, in the arm's NATIVE units
+        # (radians for the Trossen driver). Each control step the commanded goal
+        # is capped so no joint moves more than this far from its current
+        # measured position -- our own copy of lerobot's ensure_safe_goal_position
+        # so it survives the eventual lerobot_trossen migration and is controlled
+        # from here in the right (radian) units. None disables it. Only applied
+        # in joint_abs mode; eef_delta bounds its own +/- 0.01 cartesian step.
+        self.max_relative_target = max_relative_target
+        self._clamp_warn_count = 0
+
+        # Optional per-camera video recording. Writers are created lazily on the
+        # first frame (we need the frame's HxW to size the VideoWriter) and keyed
+        # by camera name. Left empty/None when --record-dir is not passed.
+        self.record_dir = record_dir
+        self._video_writers: dict[str, "cv2.VideoWriter"] = {}
+        self._video_paths: dict[str, str] = {}
+        if self.record_dir is not None:
+            os.makedirs(self.record_dir, exist_ok=True)
+            self._record_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            log.info("Recording camera streams to %s (fps=%d)",
+                     self.record_dir, control_frequency)
 
         log.info("Connecting to policy server %s:%d", server_host, server_port)
         self.policy = WebsocketClientPolicy(host=server_host, port=server_port)
@@ -135,6 +172,15 @@ class TrossenSoloPolicyBridge:
             robot_cfg.cameras["cam_wrist"].serial_number = int(cam_wrist_serial)
             log.info("  cam_wrist serial → %s", cam_wrist_serial)
 
+        # We enforce the relative-target clamp ourselves in _send_action (in the
+        # arm's native radian units), so disable lerobot's built-in scalar clamp
+        # to keep a single authority and avoid a redundant Present_Position read
+        # per step. Its default (5.0) is inherited from the degree-based feetech
+        # arms and is a no-op in radians anyway. When our clamp is disabled we
+        # leave lerobot's config default untouched as a backstop.
+        if self.max_relative_target is not None:
+            robot_cfg.max_relative_target = None
+
         self.robot = make_robot_from_config(robot_cfg)
         self.robot.connect()
 
@@ -147,8 +193,13 @@ class TrossenSoloPolicyBridge:
 
     # ------------------------------------------------------------------ obs
 
-    def _read_obs(self) -> dict:
-        observation_dict = self.robot.capture_observation()
+    def _read_obs(self, observation_dict: dict | None = None) -> dict:
+        # The caller (the run loop) already captures once per control step so it
+        # can record every frame; on inference steps it hands us that same
+        # observation to avoid a second camera read. _move_to_home() calls this
+        # with no argument, so capture on demand when none is supplied.
+        if observation_dict is None:
+            observation_dict = self.robot.capture_observation()
 
         # 1. State: 7 follower joint positions
         joint_keys = sorted(
@@ -183,13 +234,24 @@ class TrossenSoloPolicyBridge:
         else:
             state = joint_state
 
-        # 2. Images: lerobot returns HWC RGB. Send RAW 480x640 CHW to the
-        # server -- the OFT and openvla servers will cv2-resize to 224x224
-        # internally to match the tf.image.resize pixel-level behaviour their
-        # training data went through. The pi0 server keeps the raw frame as-is
-        # and lets openpi's image pipeline handle it.
+        return {
+            "state":  state,
+            "images": self._extract_images(observation_dict),
+            "prompt": getattr(self, "_task_prompt", "lift the eggplant"),
+        }
+
+    def _extract_images(self, observation_dict: dict) -> dict[str, np.ndarray]:
+        # lerobot returns HWC RGB. Send RAW 480x640 CHW to the server -- the OFT
+        # and openvla servers will cv2-resize to 224x224 internally to match the
+        # tf.image.resize pixel-level behaviour their training data went through.
+        # The pi0 server keeps the raw frame as-is and lets openpi's image
+        # pipeline handle it.
         images: dict[str, np.ndarray] = {}
-        wanted = ["cam_main"] + (["cam_wrist"] if self.send_wrist else [])
+        # In black-wrist mode we skip reading the real cam_wrist frame and
+        # substitute an all-zeros image below (sized to cam_main).
+        wanted = ["cam_main"]
+        if self.send_wrist and not self.black_wrist:
+            wanted.append("cam_wrist")
         for cam in wanted:
             key = f"observation.images.{cam}"
             if key not in observation_dict:
@@ -208,12 +270,53 @@ class TrossenSoloPolicyBridge:
             else:
                 # HWC -> CHW
                 images[cam] = np.transpose(img, (2, 0, 1))
+        # Pure-black primary frame (real frame was read above only to size it).
+        if self.black_primary:
+            images["cam_main"] = np.zeros_like(images["cam_main"])
+        # Pure-black wrist frame, same CHW shape/dtype as cam_main. Sent under
+        # the cam_wrist key so a 2-camera server still gets both inputs.
+        if self.black_wrist:
+            images["cam_wrist"] = np.zeros_like(images["cam_main"])
+        return images
 
-        return {
-            "state":  state,
-            "images": images,
-            "prompt": getattr(self, "_task_prompt", "lift the eggplant"),
-        }
+    # -------------------------------------------------------------- recording
+
+    def _record_frames(self, images: dict[str, np.ndarray]) -> None:
+        """Append the current frame of every camera to its own mp4.
+
+        `images[cam]` is RGB, CHW, uint8 (exactly what gets sent to the server).
+        VideoWriter wants HWC BGR, so we transpose + colour-convert here. Writers
+        are created on first use, sized to the frame that camera actually
+        produced; they are released in shutdown().
+        """
+        for cam, chw in images.items():
+            hwc_rgb = np.transpose(chw, (1, 2, 0))
+            bgr = cv2.cvtColor(hwc_rgb, cv2.COLOR_RGB2BGR)
+            writer = self._video_writers.get(cam)
+            if writer is None:
+                h, w = bgr.shape[:2]
+                path = os.path.join(
+                    self.record_dir, f"{self._record_stamp}_{cam}.mp4"
+                )
+                # The run loop records one frame per control step, so the frame
+                # rate equals control_frequency and the clip plays back at true
+                # real-time speed.
+                writer = cv2.VideoWriter(
+                    path,
+                    cv2.VideoWriter_fourcc(*"mp4v"),
+                    float(self.control_frequency),
+                    (w, h),
+                )
+                if not writer.isOpened():
+                    log.warning("Could not open VideoWriter for %s at %s; "
+                                "disabling recording for this camera", cam, path)
+                    self._video_writers[cam] = writer  # cache the dud so we stop retrying
+                    continue
+                self._video_writers[cam] = writer
+                self._video_paths[cam] = path
+                log.info("  recording %s -> %s (%dx%d)", cam, path, w, h)
+            if writer.isOpened():
+                writer.write(bgr)
 
     # ------------------------------------------------------------------ act
 
@@ -232,6 +335,40 @@ class TrossenSoloPolicyBridge:
                 "with a follower arm named 'main'."
             ) from exc
 
+    def _read_present_position(self) -> np.ndarray:
+        """Current measured follower joint positions (radians), concatenated in
+        motor order across all follower arms and truncated to ACTION_DIM."""
+        vals: list[float] = []
+        for name in self.robot.follower_arms:
+            pos = self.robot.follower_arms[name].read("Present_Position")
+            vals.extend(np.asarray(pos, dtype=np.float32).reshape(-1).tolist())
+        return np.asarray(vals[:ACTION_DIM], dtype=np.float32)
+
+    def _clamp_action(self, action: np.ndarray, present: np.ndarray) -> np.ndarray:
+        """Cap the per-joint magnitude of (action - present) so no joint is asked
+        to move more than `max_relative_target` in one control step. Mirrors
+        lerobot's ensure_safe_goal_position; `max_relative_target` is a scalar or
+        an ACTION_DIM list, in radians (the Trossen driver's native units)."""
+        if self.max_relative_target is None:
+            return action
+        limit = np.asarray(self.max_relative_target, dtype=np.float32)
+        diff = action - present
+        safe_diff = np.clip(diff, -limit, limit)
+        safe = (present + safe_diff).astype(np.float32)
+        if not np.allclose(diff, safe_diff, atol=1e-6):
+            # Throttle: clamping every step at 20 Hz would flood the log.
+            self._clamp_warn_count += 1
+            if self._clamp_warn_count == 1 or self._clamp_warn_count % 20 == 0:
+                log.warning(
+                    "[clamp] step commanded a large joint move (count=%d); "
+                    "requested Δ=%s -> clamped Δ=%s (limit=%s rad)",
+                    self._clamp_warn_count,
+                    np.round(diff, 4).tolist(),
+                    np.round(safe_diff, 4).tolist(),
+                    limit.tolist() if limit.ndim else float(limit),
+                )
+        return safe
+
     def _send_action(self, action: np.ndarray) -> None:
         if action.shape != (ACTION_DIM,):
             raise ValueError(f"action shape must be ({ACTION_DIM},); got {action.shape}")
@@ -244,6 +381,11 @@ class TrossenSoloPolicyBridge:
             return
 
         # joint_abs mode (default, backward compatible)
+        # Safety clamp: cap each joint's step relative to its CURRENT measured
+        # position before the goal ever reaches the motors. (eef_delta returns
+        # above and bounds its own +/- 0.01 cartesian step.)
+        if self.max_relative_target is not None:
+            action = self._clamp_action(action, self._read_present_position())
         # The follower arm expects an action under the key
         # `action.{joint_name}` per joint; lerobot 0.1.0's ManipulatorRobot
         # consumes a torch.tensor of shape (ACTION_DIM,).
@@ -324,12 +466,21 @@ class TrossenSoloPolicyBridge:
         while self.episode_step < self.max_steps:
             tick = time.perf_counter()
 
+            # Capture once per control step. When recording, this gives us a
+            # frame for every step (smooth real-time video at control_frequency)
+            # rather than only on inference steps. The captured observation is
+            # reused for inference below, so inference steps read the camera once.
+            step_obs_dict = None
+            if self.record_dir is not None:
+                step_obs_dict = self.robot.capture_observation()
+                self._record_frames(self._extract_images(step_obs_dict))
+
             need_new_chunk = (
                 self.current_chunk is None
                 or self.chunk_idx >= self.rate_of_inference
             )
             if need_new_chunk:
-                obs = self._read_obs()
+                obs = self._read_obs(step_obs_dict)
                 resp = self.policy.infer(obs)
                 self.current_chunk = np.asarray(resp["actions"], dtype=np.float32)
                 self.chunk_idx = 0
@@ -352,10 +503,52 @@ class TrossenSoloPolicyBridge:
         log.info("Episode finished at step %d", self.episode_step)
 
     def shutdown(self) -> None:
+        for cam, writer in self._video_writers.items():
+            try:
+                writer.release()
+                log.info("  finalised recording for %s", cam)
+            except Exception as exc:
+                log.warning("Releasing VideoWriter for %s raised: %s", cam, exc)
+        # The OpenCV bundled with this venv can only encode mpeg4 part 2 (mp4v),
+        # which browsers / VS Code / most default players refuse to play. The
+        # system ffmpeg does have libx264, so re-encode each finished file to
+        # H.264 in place. If ffmpeg is missing we just leave the mp4v files.
+        self._transcode_recordings_to_h264()
         try:
             self.robot.disconnect()
         except Exception as exc:
             log.warning("Robot disconnect raised: %s", exc)
+
+    def _transcode_recordings_to_h264(self) -> None:
+        if not self._video_paths:
+            return
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg is None:
+            log.warning("ffmpeg not on PATH; leaving recordings as mp4v "
+                        "(open them in VLC/mpv, or transcode manually)")
+            return
+        for cam, path in self._video_paths.items():
+            if not os.path.exists(path):
+                continue
+            tmp = path + ".h264.tmp.mp4"
+            cmd = [
+                ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                "-i", path,
+                "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart", tmp,
+            ]
+            try:
+                subprocess.run(cmd, check=True)
+                os.replace(tmp, path)  # keep the clean <stamp>_<cam>.mp4 name
+                log.info("  transcoded %s to H.264", path)
+            except Exception as exc:
+                log.warning("H.264 transcode of %s failed (%s); keeping mp4v file",
+                            path, exc)
+                if os.path.exists(tmp):
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
 
 
 # The six task strings that the 6-task pi0 / OFT models were trained on.
@@ -368,6 +561,26 @@ TROSSEN_6TASK_PROMPTS = (
     "pick up the eggplant and place it in the plate",
     "pick up the pineapple and place it in the plate",
 )
+
+
+def _parse_max_relative_target(s: str | None) -> float | list[float] | None:
+    """Parse the --max-relative-target CLI value: 'none'/'off'/'' or a
+    non-positive scalar disables it; a comma-separated string gives per-joint
+    limits (must be ACTION_DIM values); otherwise a single float."""
+    if s is None:
+        return None
+    t = s.strip().lower()
+    if t in {"none", "off", "disable", ""}:
+        return None
+    if "," in t:
+        parts = [float(x) for x in t.split(",")]
+        if len(parts) != ACTION_DIM:
+            raise argparse.ArgumentTypeError(
+                f"--max-relative-target list must have {ACTION_DIM} values, got {len(parts)}"
+            )
+        return parts
+    val = float(t)
+    return val if val > 0 else None
 
 
 def _pick_task_prompt_interactively() -> str:
@@ -422,7 +635,18 @@ def main() -> None:
     parser.add_argument("--camera-interface", default="intel_realsense",
                         choices=["intel_realsense", "opencv"])
     parser.add_argument("--no-wrist", action="store_true",
-                        help="Send only cam_main (use when serving plain OpenVLA)")
+                        help="Send only cam_main, dropping the cam_wrist key entirely "
+                             "(use when serving plain OpenVLA).")
+    parser.add_argument("--black-wrist", action="store_true",
+                        help="Still send the cam_wrist key but with an all-zeros (pure "
+                             "black) frame instead of the real wrist view. Use to mask "
+                             "the wrist input for a 2-camera checkpoint (OFT/pi0) without "
+                             "dropping the key. Mutually exclusive with --no-wrist.")
+    parser.add_argument("--black-primary", action="store_true",
+                        help="Send the cam_main key with an all-zeros (pure black) frame "
+                             "instead of the real primary view. The real frame is still "
+                             "read to size the black image. Can be combined with "
+                             "--black-wrist to blank both views.")
     parser.add_argument("--follower-ip", default=None,
                         help="Override follower arm IP (default config: 192.168.1.3)")
     parser.add_argument("--leader-ip", default=None,
@@ -438,6 +662,24 @@ def main() -> None:
     parser.add_argument("--connect-only", action="store_true",
                         help="Connect to robot, print one observation, disconnect. "
                              "Does NOT touch the policy server or motors.")
+    parser.add_argument("--record-dir", default=None,
+                        help="If set, record each camera stream to its own mp4 in "
+                             "this directory (files named <timestamp>_<cam>.mp4, e.g. "
+                             "20260715_143022_cam_main.mp4). Frames are the RAW frames "
+                             "sent to the server; fps = --control-frequency. Off by "
+                             "default.")
+    parser.add_argument("--max-relative-target", default="0.1",
+                        help="Per-step safety clamp on joint motion, in the arm's "
+                             "NATIVE units (RADIANS for the Trossen driver). Each "
+                             "control step the commanded goal is capped so no joint "
+                             "moves more than this far from its current MEASURED "
+                             "position (our copy of lerobot's ensure_safe_goal_position). "
+                             "Pass a single float for all 7 joints, a comma-separated "
+                             "list of 7 for per-joint limits, or 'none' to disable. "
+                             "Default 0.3 rad (~17 deg/step; ~5.7 rad/s at 20 Hz) -- "
+                             "loose enough not to touch normal motion, tight enough to "
+                             "stop a pathological jump. Only active in --mode autonomous "
+                             "and --action-mode joint_abs (eef_delta bounds its own step).")
     parser.add_argument("--reset-to-home", action="store_true",
                         help="Before the policy loop starts, linearly interpolate from "
                              "the current pose to the trained home pose "
@@ -464,6 +706,10 @@ def main() -> None:
                              "less new-command overshoot. Only used when --action-mode "
                              "eef_delta.")
     args = parser.parse_args()
+
+    if args.no_wrist and args.black_wrist:
+        parser.error("--no-wrist and --black-wrist are mutually exclusive: "
+                     "--no-wrist drops cam_wrist, --black-wrist sends it black.")
 
     if args.action_mode == "eef_delta" and args.reset_to_home:
         log.warning("--reset-to-home is a joint-space maneuver; ignoring in eef_delta mode")
@@ -516,6 +762,10 @@ def main() -> None:
         reset_to_home=args.reset_to_home,
         action_mode=args.action_mode,
         eef_goal_time=args.eef_goal_time,
+        record_dir=args.record_dir,
+        max_relative_target=_parse_max_relative_target(args.max_relative_target),
+        black_wrist=args.black_wrist,
+        black_primary=args.black_primary,
     )
     try:
         prompt = args.task_prompt if args.task_prompt is not None else _pick_task_prompt_interactively()
