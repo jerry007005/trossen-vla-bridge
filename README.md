@@ -58,10 +58,12 @@ Additional OFT checkpoints (pass via `--checkpoint`, `--unnorm-key`):
 - `UoA-Trossen-Arm/openvla-7b-oft-diverse-pnp-png` — OFT L1 head on single-task starfruit→pot; use `--unnorm-key diverse_pnp_png`
 - `UoA-Trossen-Arm/openvla-7b-oft-trossen-6task-png` — OFT L1 head on 6-task combined data; use `--unnorm-key trossen_6task_combined_png`
 - `UoA-Trossen-Arm/openvla-7b-oft-trossen-6task-png-diffusion` — OFT **DDIM diffusion** head on 6-task combined; `serve_oft.py` auto-detects "diffusion" in the checkpoint name and enables `use_diffusion=True` (also loads the required `noisy_action_projector`). Force explicitly with `--use-diffusion` / `--no-use-diffusion`.
+- `UoA-Trossen-Arm/openvla-7b-oft-pnp-4diverse-png-adv-encoder` — **adversarially-trained vision encoder** variant of the default OFT ckpt. Only the visual encoder differs from the base `openvla-7b-oft-pnp-4diverse-png`; action head + dataset stats copied over. Drop-in replacement; keep `--unnorm-key pnp_4diverse_png`. Use to A/B test robustness against EDPA patches (see `embodiedAI/perturbation/openvla-oft-edpa/pnp-4diverse-alpha-0.8/`).
 
 Additional pi0 checkpoint (pass via `--checkpoint`, `--config-name`):
 
 - `UoA-Trossen-Arm/pi0-trossen-6task` — pi0 on the 6-task combined data; use `--config-name pi0_trossen_6task_low_mem_finetune`
+- `UoA-Trossen-Arm/pi0-trossen-pnp-4diverse-adv-encoder` — **adversarially-trained vision encoder** variant of the default pi0 ckpt (only `paligemma.vision_tower` weights differ; `config.json` + `norm_stats.json` copied from base). Drop-in replacement; keep `--config-name pi0_trossen_pnp_4diverse_low_mem_finetune`. Same A/B pattern: run baseline pi0 and this side-by-side against the pre-generated EDPA patches at `embodiedAI/perturbation/pi0-edpa/pnp-4diverse-alpha-0.8/`.
 
 Additional vanilla-OpenVLA checkpoints (pass via `--checkpoint`, `--image-key`, `--unnorm-key`):
 
